@@ -1,0 +1,8 @@
+# Replace this domain, point DNS to your server, and restrict direct access to 8000.
+echo.example.com {
+    reverse_proxy 127.0.0.1:8000 {
+        flush_interval -1
+    }
+    header X-Content-Type-Options nosniff
+    header Referrer-Policy no-referrer
+}

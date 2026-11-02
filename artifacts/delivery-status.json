@@ -1,0 +1,36 @@
+{
+  "version": "0.1.0",
+  "delivery_date": "2026-11-02",
+  "delivery_kind": "source-mvp",
+  "native_apk_included": false,
+  "validation": {
+    "backend_pytest": {
+      "passed": 64,
+      "seconds": 3.13
+    },
+    "kotlin_core_smoke": {
+      "passed": 10
+    },
+    "browser_offline_render": {
+      "passed": 3
+    },
+    "http_synthetic_demo": {
+      "events": 3
+    },
+    "android_app_compile": "not_run",
+    "android_device_recording": "not_run",
+    "silero_real_inference": "not_run",
+    "gemini_live_call": "not_run",
+    "docker_build": "not_run",
+    "github_workflow": "not_run"
+  },
+  "limitations": [
+    "single-owner service",
+    "server-side VAD does not reduce phone upload",
+    "speaker embedding extraction not integrated",
+    "memory is evidence excerpts plus user confirmation",
+    "event grouping is per processing batch",
+    "no automatic raw-audio retention",
+    "MCP is read-only protocol subset"
+  ]
+}

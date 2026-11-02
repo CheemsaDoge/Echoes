@@ -1,0 +1,59 @@
+
+CREATE TABLE IF NOT EXISTS schema_version(version INTEGER PRIMARY KEY);
+INSERT OR IGNORE INTO schema_version VALUES(1);
+CREATE TABLE IF NOT EXISTS profiles(
+ id TEXT PRIMARY KEY, name TEXT NOT NULL, config TEXT NOT NULL, created_ms INTEGER NOT NULL, active INTEGER NOT NULL DEFAULT 0);
+CREATE UNIQUE INDEX IF NOT EXISTS one_active_profile ON profiles(active) WHERE active=1;
+CREATE TABLE IF NOT EXISTS deleted_sessions(id TEXT PRIMARY KEY, deleted_ms INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS sessions(
+ id TEXT PRIMARY KEY, started_at_ms INTEGER NOT NULL, timezone_offset_min INTEGER NOT NULL,
+ purpose TEXT NOT NULL, device_id TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'recording',
+ final_seq INTEGER, next_batch_seq INTEGER NOT NULL DEFAULT 0, interrupted INTEGER NOT NULL DEFAULT 0, created_ms INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS chunks(
+ id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+ seq INTEGER NOT NULL, start_sample INTEGER NOT NULL, sample_count INTEGER NOT NULL,
+ sha256 TEXT NOT NULL, path TEXT NOT NULL, metadata TEXT NOT NULL, created_ms INTEGER NOT NULL,
+ batch_id TEXT, UNIQUE(session_id, seq));
+CREATE TABLE IF NOT EXISTS batches(
+ id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+ first_seq INTEGER NOT NULL, last_seq INTEGER NOT NULL, chunk_ids TEXT NOT NULL,
+ profile_id TEXT NOT NULL REFERENCES profiles(id), state TEXT NOT NULL DEFAULT 'queued',
+ attempts INTEGER NOT NULL DEFAULT 0, available_ms INTEGER NOT NULL, lease_until_ms INTEGER,
+ lease_token TEXT, error TEXT, metrics TEXT NOT NULL DEFAULT '{}', created_ms INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS jobs_ready ON batches(state, available_ms);
+CREATE TABLE IF NOT EXISTS speakers(id TEXT PRIMARY KEY, name TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '', created_ms INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS segments(
+ id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+ batch_id TEXT NOT NULL REFERENCES batches(id) ON DELETE CASCADE, ordinal INTEGER NOT NULL,
+ start_ms INTEGER NOT NULL, end_ms INTEGER NOT NULL, text TEXT NOT NULL,
+ local_speaker TEXT NOT NULL, speaker_id TEXT REFERENCES speakers(id) ON DELETE SET NULL,
+ source_spans TEXT NOT NULL, timing_quality TEXT NOT NULL, is_demo INTEGER NOT NULL DEFAULT 0,
+ UNIQUE(batch_id,ordinal));
+CREATE INDEX IF NOT EXISTS segments_time ON segments(start_ms);
+CREATE TABLE IF NOT EXISTS voiceprints(
+ id TEXT PRIMARY KEY, speaker_id TEXT NOT NULL REFERENCES speakers(id) ON DELETE CASCADE,
+ model_id TEXT NOT NULL, embedding TEXT NOT NULL,
+ evidence_segment_id TEXT NOT NULL REFERENCES segments(id) ON DELETE CASCADE,
+ consent INTEGER NOT NULL CHECK(consent=1), created_ms INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS event_types(id TEXT PRIMARY KEY, name TEXT NOT NULL, keywords TEXT NOT NULL, color TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS events(
+ id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+ start_ms INTEGER NOT NULL, end_ms INTEGER NOT NULL, title TEXT NOT NULL, summary TEXT NOT NULL,
+ type_id TEXT NOT NULL REFERENCES event_types(id), user_edited INTEGER NOT NULL DEFAULT 0,
+ is_demo INTEGER NOT NULL DEFAULT 0, updated_ms INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS events_time ON events(start_ms);
+CREATE TABLE IF NOT EXISTS event_segments(
+ event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+ segment_id TEXT NOT NULL REFERENCES segments(id) ON DELETE CASCADE,
+ PRIMARY KEY(event_id,segment_id));
+CREATE TABLE IF NOT EXISTS memories(
+ id TEXT PRIMARY KEY, event_id TEXT NOT NULL UNIQUE REFERENCES events(id) ON DELETE CASCADE,
+ text TEXT NOT NULL, confirmed INTEGER NOT NULL DEFAULT 0, user_edited INTEGER NOT NULL DEFAULT 0, created_ms INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS changes(
+ cursor INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, entity_id TEXT NOT NULL, created_ms INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS usage(
+ id TEXT PRIMARY KEY, batch_id TEXT NOT NULL,
+ day TEXT NOT NULL, audio_seconds REAL NOT NULL, provider TEXT NOT NULL, created_ms INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS calibrations(
+ id TEXT PRIMARY KEY, chunk_id TEXT NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
+ scenario TEXT NOT NULL, config TEXT NOT NULL, labels TEXT NOT NULL, result TEXT NOT NULL, created_ms INTEGER NOT NULL);

@@ -1,0 +1,9 @@
+{
+  "checks_passed": 3,
+  "checks": [
+    "Rendered three real backend demo records from captured fixtures",
+    "412px viewport has no horizontal overflow",
+    "No JavaScript errors during offline render"
+  ],
+  "scope": "Offline rendering using captured HTTP demo data. Browser navigation to localhost was blocked by environment policy; interactive HTTP browser integration NOT verified. NOT native Android."
+}

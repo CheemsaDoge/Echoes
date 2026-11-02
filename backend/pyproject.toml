@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "echoledger"
+version = "0.1.0"
+description = "Local-first personal audio journal backend"
+requires-python = ">=3.11"
+dependencies = ["fastapi>=0.115,<1", "uvicorn>=0.30,<1", "pydantic>=2.9,<3", "httpx>=0.27,<1", "numpy>=1.26,<3"]
+
+[project.optional-dependencies]
+vad = ["onnxruntime>=1.19,<2"]
+test = ["pytest>=8,<10"]
+
+[project.scripts]
+echoledger-worker = "echoledger.worker:main"
+echoledger-mcp = "echoledger.mcp_stdio:main"
+
+[tool.setuptools.packages.find]
+include = ["echoledger*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

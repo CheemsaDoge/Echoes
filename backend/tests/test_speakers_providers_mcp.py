@@ -119,7 +119,10 @@ def vertex_example_response(text="Hello from Vertex", start_ms=100, end_ms=800):
         "usageMetadata": {"promptTokenCount": 50, "candidatesTokenCount": 20, "totalTokenCount": 70}
     }
 
-def test_vertexai_url_resolution():
+def test_vertexai_url_resolution(monkeypatch):
+    import google.auth.exceptions
+    monkeypatch.setattr("google.auth.default", lambda scopes=None: (_ for _ in ()).throw(google.auth.exceptions.DefaultCredentialsError("No credentials")))
+
     t_global = VertexAiTranscriber(project="p1", location="global", model="gemini-2.5-flash")
     assert t_global.resolve_endpoint() == "https://aiplatform.googleapis.com/v1/projects/p1/locations/global/publishers/google/models/gemini-2.5-flash:generateContent"
 

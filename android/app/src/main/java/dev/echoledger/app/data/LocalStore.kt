@@ -6,6 +6,7 @@ import dev.echoledger.core.SAMPLE_RATE
 import dev.echoledger.core.WavFile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.nio.ByteBuffer
@@ -92,18 +93,88 @@ class LocalStore(val context: Context, val dao: JournalDao) {
         }
     }
 
-    fun getSceneTag(sessionId: String): String {
-        val tagFile = File(folder(sessionId), "scene_tag.txt")
-        if (tagFile.exists()) {
-            val text = tagFile.readText().trim()
-            if (text.isNotBlank()) return text
-        }
-        return "未分类"
-    }
+    suspend fun buildSessionManifest(sessionId: String): JSONObject {
+        val dir = folder(sessionId)
+        val session = dao.session(sessionId)
+        val startedAtMs = session?.startedAtMs ?: runCatching {
+            JSONObject(File(dir, "session.json").readText()).getLong("started_at_ms")
+        }.getOrDefault(System.currentTimeMillis())
+        val startedAtIso = Instant.ofEpochMilli(startedAtMs).toString()
+        val tzOffset = session?.timezoneOffsetMin ?: runCatching {
+            JSONObject(File(dir, "session.json").readText()).getInt("timezone_offset_min")
+        }.getOrDefault(0)
+        val purpose = session?.purpose ?: runCatching {
+            JSONObject(File(dir, "session.json").readText()).getString("purpose")
+        }.getOrDefault("journal")
+        val state = session?.state ?: "finished"
+        val finalSeq = session?.finalSeq
 
-    fun setSceneTag(sessionId: String, tag: String) {
-        val tagFile = File(folder(sessionId), "scene_tag.txt")
-        tagFile.writeText(tag.trim())
+        val sessionObj = JSONObject().apply {
+            put("id", sessionId)
+            put("started_at_ms", startedAtMs)
+            put("started_at_iso", startedAtIso)
+            put("timezone_offset_min", tzOffset)
+            put("purpose", purpose)
+            put("state", state)
+            if (finalSeq != null) put("final_seq", finalSeq) else put("final_seq", JSONObject.NULL)
+        }
+
+        val chunksArray = JSONArray()
+        val dbChunks = dao.chunks(sessionId).sortedBy { it.seq }
+        val chunksList = if (dbChunks.isNotEmpty()) {
+            dbChunks
+        } else {
+            val sidecars = dir.listFiles()?.filter { it.name.endsWith(".chunk.json") }?.sortedBy { it.name } ?: emptyList()
+            sidecars.mapNotNull { sidecar ->
+                runCatching {
+                    val meta = JSONObject(sidecar.readText())
+                    val stem = sidecar.name.removeSuffix(".chunk.json")
+                    val wav = File(dir, "$stem.wav")
+                    val count = if (wav.exists() && wav.length() > 44) ((wav.length() - 44) / 2).toInt() else 0
+                    LocalChunk(
+                        meta.getString("id"),
+                        meta.getString("session_id"),
+                        meta.getInt("seq"),
+                        meta.getLong("start_sample"),
+                        count,
+                        wav.absolutePath,
+                        if (wav.exists()) checksum(wav) else "",
+                        meta.getLong("start_monotonic_ns"),
+                        meta.optLong("clock_drift_ms", 0)
+                    )
+                }.getOrNull()
+            }
+        }
+
+        for (c in chunksList) {
+            val seqFormatted = "%08d".format(c.seq)
+            val wavFile = "$seqFormatted.wav"
+            val metaFile = "$seqFormatted.chunk.json"
+            val durationMs = c.sampleCount.toLong() * 1000L / SAMPLE_RATE
+            val startUtcMs = startedAtMs + (c.startSample * 1000L / SAMPLE_RATE)
+            val endUtcMs = startUtcMs + durationMs
+
+            val cObj = JSONObject().apply {
+                put("id", c.id)
+                put("seq", c.seq)
+                put("wav_file", wavFile)
+                put("meta_file", metaFile)
+                put("start_sample", c.startSample)
+                put("sample_count", c.sampleCount)
+                put("duration_ms", durationMs)
+                put("start_utc_ms", startUtcMs)
+                put("end_utc_ms", endUtcMs)
+                put("start_monotonic_ns", c.startMonotonicNs)
+                put("clock_drift_ms", c.clockDriftMs)
+                put("sha256", c.sha256)
+            }
+            chunksArray.put(cObj)
+        }
+
+        return JSONObject().apply {
+            put("session", sessionObj)
+            put("chunks", chunksArray)
+        }
     }
 
     suspend fun exportMergedWav(sessionId: String): File = withContext(Dispatchers.IO) {
@@ -113,10 +184,9 @@ class LocalStore(val context: Context, val dao: JournalDao) {
         }.getOrDefault(System.currentTimeMillis())
         val timestamp = Instant.ofEpochMilli(startedAtMs).atZone(ZoneId.systemDefault())
             .format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"))
-        val sceneTag = getSceneTag(sessionId)
         val idPrefix = sessionId.take(6)
         val exportDir = File(context.cacheDir, "exports").apply { mkdirs() }
-        val outputFile = File(exportDir, "echo_${timestamp}_${sceneTag}_${idPrefix}.wav")
+        val outputFile = File(exportDir, "echo_${timestamp}_${idPrefix}.wav")
 
         val chunks = dao.chunks(sessionId)
         val wavFiles = if (chunks.isNotEmpty()) {
@@ -137,7 +207,6 @@ class LocalStore(val context: Context, val dao: JournalDao) {
             "录音总大小超过单 WAV 文件大小限制 (~37小时)，请使用分块 ZIP 格式导出"
         }
 
-        // Use unique temporary file to isolate concurrent exports
         val tempFile = File(exportDir, "tmp_${UUID.randomUUID()}.wav")
         try {
             tempFile.outputStream().buffered().use { out ->
@@ -195,21 +264,28 @@ class LocalStore(val context: Context, val dao: JournalDao) {
         }.getOrDefault(System.currentTimeMillis())
         val timestamp = Instant.ofEpochMilli(startedAtMs).atZone(ZoneId.systemDefault())
             .format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"))
-        val sceneTag = getSceneTag(sessionId)
         val idPrefix = sessionId.take(6)
         val exportDir = File(context.cacheDir, "exports").apply { mkdirs() }
-        val outputFile = File(exportDir, "echo_${timestamp}_${sceneTag}_${idPrefix}_chunks.zip")
+        val outputFile = File(exportDir, "echo_${timestamp}_${idPrefix}_chunks.zip")
         val tempFile = File(exportDir, "tmp_${UUID.randomUUID()}.zip")
 
+        val manifest = buildSessionManifest(sessionId)
+
         val filesToZip = dir.listFiles()?.filter { f ->
-            f.isFile && (f.name.endsWith(".wav") || f.name.endsWith(".chunk.json") ||
-                         f.name == "session.json" || f.name == "scene_tag.txt")
+            f.isFile && (f.name.endsWith(".wav") || f.name.endsWith(".chunk.json") || f.name == "session.json")
         }?.sortedBy { it.name } ?: emptyList()
 
         require(filesToZip.isNotEmpty()) { "会话目录下没有可打包的文件" }
 
         try {
             ZipOutputStream(tempFile.outputStream().buffered()).use { zipOut ->
+                // Write manifest.json at ZIP root
+                val manifestEntry = ZipEntry("manifest.json")
+                manifestEntry.time = System.currentTimeMillis()
+                zipOut.putNextEntry(manifestEntry)
+                zipOut.write(manifest.toString(2).toByteArray(Charsets.UTF_8))
+                zipOut.closeEntry()
+
                 for (f in filesToZip) {
                     val entry = ZipEntry(f.name)
                     entry.time = f.lastModified()
@@ -217,6 +293,85 @@ class LocalStore(val context: Context, val dao: JournalDao) {
                     f.inputStream().buffered().use { it.copyTo(zipOut) }
                     zipOut.closeEntry()
                 }
+                zipOut.finish()
+            }
+
+            if (outputFile.exists()) outputFile.delete()
+            if (!tempFile.renameTo(outputFile)) {
+                tempFile.copyTo(outputFile, overwrite = true)
+                tempFile.delete()
+            }
+        } finally {
+            if (tempFile.exists()) tempFile.delete()
+        }
+        outputFile
+    }
+
+    suspend fun exportAllSessionsZip(): File = withContext(Dispatchers.IO) {
+        val sessions = dao.sessions()
+        val exportDir = File(context.cacheDir, "exports").apply { mkdirs() }
+        val timestamp = Instant.now().atZone(ZoneId.systemDefault()).format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"))
+        val outputFile = File(exportDir, "echo_all_chunks_${timestamp}.zip")
+        val tempFile = File(exportDir, "tmp_${UUID.randomUUID()}.zip")
+
+        val indexObj = JSONObject().apply {
+            put("exported_at_ms", System.currentTimeMillis())
+            put("exported_at_iso", Instant.now().toString())
+            put("total_sessions", sessions.size)
+        }
+        val sessionSummaries = JSONArray()
+
+        try {
+            ZipOutputStream(tempFile.outputStream().buffered()).use { zipOut ->
+                for (s in sessions) {
+                    val sDir = folder(s.id)
+                    if (!sDir.exists()) continue
+                    val manifest = buildSessionManifest(s.id)
+                    val chunksArray = manifest.optJSONArray("chunks")
+                    val chunkCount = chunksArray?.length() ?: 0
+                    var totalSamples = 0L
+                    if (chunksArray != null) {
+                        for (i in 0 until chunksArray.length()) {
+                            totalSamples += chunksArray.getJSONObject(i).optLong("sample_count", 0L)
+                        }
+                    }
+
+                    sessionSummaries.put(JSONObject().apply {
+                        put("id", s.id)
+                        put("started_at_ms", s.startedAtMs)
+                        put("started_at_iso", Instant.ofEpochMilli(s.startedAtMs).toString())
+                        put("chunk_count", chunkCount)
+                        put("duration_ms", totalSamples * 1000L / SAMPLE_RATE)
+                    })
+
+                    // Write s.id/manifest.json
+                    val mEntry = ZipEntry("${s.id}/manifest.json")
+                    mEntry.time = System.currentTimeMillis()
+                    zipOut.putNextEntry(mEntry)
+                    zipOut.write(manifest.toString(2).toByteArray(Charsets.UTF_8))
+                    zipOut.closeEntry()
+
+                    // Write other files in sDir
+                    val files = sDir.listFiles()?.filter { f ->
+                        f.isFile && (f.name.endsWith(".wav") || f.name.endsWith(".chunk.json") || f.name == "session.json")
+                    }?.sortedBy { it.name } ?: emptyList()
+
+                    for (f in files) {
+                        val entry = ZipEntry("${s.id}/${f.name}")
+                        entry.time = f.lastModified()
+                        zipOut.putNextEntry(entry)
+                        f.inputStream().buffered().use { it.copyTo(zipOut) }
+                        zipOut.closeEntry()
+                    }
+                }
+
+                indexObj.put("sessions", sessionSummaries)
+                val indexEntry = ZipEntry("export_index.json")
+                indexEntry.time = System.currentTimeMillis()
+                zipOut.putNextEntry(indexEntry)
+                zipOut.write(indexObj.toString(2).toByteArray(Charsets.UTF_8))
+                zipOut.closeEntry()
+
                 zipOut.finish()
             }
 

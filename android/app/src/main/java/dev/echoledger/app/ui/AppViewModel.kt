@@ -21,7 +21,7 @@ import org.json.JSONObject
 import java.io.File
 import java.time.LocalDate
 
-data class SessionAudioInfo(val chunkCount: Int, val totalSamples: Long, val sceneTag: String)
+data class SessionAudioInfo(val chunkCount: Int, val totalSamples: Long)
 
 class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val graph = (application as EchoApp).graph
@@ -34,40 +34,21 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     val pending = repo.dao.pendingCount().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
     val localSessions = repo.dao.observeSessions().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    val selectedSceneTag = MutableStateFlow("谈话")
-    val tagVersion = MutableStateFlow(0)
-
     val sessionStats: StateFlow<Map<String, SessionAudioInfo>> = combine(
         repo.dao.observeSessions(),
-        repo.dao.observeAllChunks(),
-        tagVersion
-    ) { sessions, chunks, _ ->
+        repo.dao.observeAllChunks()
+    ) { sessions, chunks ->
         val chunksBySession = chunks.groupBy { it.sessionId }
         sessions.associate { s ->
             val sessionChunks = chunksBySession[s.id] ?: emptyList()
             val count = sessionChunks.size
             val samples = sessionChunks.sumOf { it.sampleCount.toLong() }
-            val tag = repo.local.getSceneTag(s.id)
-            s.id to SessionAudioInfo(count, samples, tag)
+            s.id to SessionAudioInfo(count, samples)
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyMap())
 
     private val _playingSessionId = MutableStateFlow<String?>(null)
     val playingSessionId: StateFlow<String?> = _playingSessionId.asStateFlow()
-
-    init {
-        viewModelScope.launch {
-            recording.collect { state ->
-                if (state.recording && state.sessionId.isNotBlank()) {
-                    val currentTag = repo.local.getSceneTag(state.sessionId)
-                    if (currentTag == "未分类") {
-                        repo.local.setSceneTag(state.sessionId, selectedSceneTag.value)
-                        tagVersion.value++
-                    }
-                }
-            }
-        }
-    }
 
     private fun cached(kind: String) = repo.observe(kind).map { entries -> entries.map { JSONObject(it.payload) } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -175,9 +156,50 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun setSessionSceneTag(sessionId: String, tag: String) {
-        repo.local.setSceneTag(sessionId, tag)
-        tagVersion.value++
+    fun saveAllToDownloads() = act {
+        val app = getApplication<Application>()
+        val savedName = withContext(Dispatchers.IO) {
+            val file = repo.local.exportAllSessionsZip()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val values = ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, file.name)
+                    put(MediaStore.MediaColumns.MIME_TYPE, "application/zip")
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/EchoLedger")
+                }
+                val uri = app.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                    ?: error("无法在系统 Downloads 目录创建条目")
+                app.contentResolver.openOutputStream(uri)?.use { out ->
+                    file.inputStream().buffered().use { it.copyTo(out) }
+                } ?: error("无法写入系统 Downloads 文件")
+            } else {
+                @Suppress("DEPRECATION")
+                val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "EchoLedger").apply { mkdirs() }
+                val dest = File(dir, file.name)
+                try {
+                    file.copyTo(dest, overwrite = true)
+                } catch (_: Exception) {
+                    val fallbackDir = app.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: app.filesDir
+                    file.copyTo(File(fallbackDir, file.name), overwrite = true)
+                }
+            }
+            file.name
+        }
+        repo.message.value = "已保存全部 Chunks 至 Download/EchoLedger/$savedName"
+    }
+
+    fun shareAllSessions(context: Context) = act {
+        val file = repo.local.exportAllSessionsZip()
+        val authority = "${context.packageName}.fileprovider"
+        val uri = FileProvider.getUriForFile(context, authority, file)
+        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+            type = "application/zip"
+            putExtra(Intent.EXTRA_STREAM, uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        val chooser = Intent.createChooser(shareIntent, "分享全部录音 Chunks 包").apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        context.startActivity(chooser)
     }
 
     fun saveToDownloads(sessionId: String, asZip: Boolean = false) = act {
@@ -230,7 +252,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun deleteSession(id: String) = act {
         if (_playingSessionId.value == id) stopPlayback()
         repo.deleteSession(id)
-        tagVersion.value++
         if (repo.prefs.token.isNotBlank()) {
             runCatching { repo.refresh(day.value) }
         }

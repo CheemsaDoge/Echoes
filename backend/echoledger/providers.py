@@ -183,7 +183,7 @@ class VertexAiTranscriber:
     def __init__(
         self,
         project: str = "",
-        location: str = "us-central1",
+        location: str = "global",
         model: str = "gemini-2.5-flash",
         credentials_path: str = "",
         api_key: str = "",
@@ -191,7 +191,7 @@ class VertexAiTranscriber:
         transport = None,
     ):
         self.project = project
-        self.location = location or "us-central1"
+        self.location = location or "global"
         self.model = model or "gemini-2.5-flash"
         self.credentials_path = credentials_path
         self.api_key = api_key

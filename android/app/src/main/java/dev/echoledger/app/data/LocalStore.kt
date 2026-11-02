@@ -83,11 +83,11 @@ class LocalStore(val context: Context, val dao: JournalDao) {
         check(!directory.exists() || directory.deleteRecursively()) { "Could not remove all local audio files" }
         dao.deleteChunks(sessionId) // Keep the local tombstone to prevent recovery/re-upload.
 
-        // Clean up internal cached export variants for this session
+        // Clean up internal cached export variants for this session and any aggregate exports containing it
         val exportDir = File(context.cacheDir, "exports")
         val idPrefix = sessionId.take(6)
         exportDir.listFiles()?.forEach { f ->
-            if (f.name.contains(idPrefix) || f.name.contains(sessionId)) {
+            if (f.name.contains(idPrefix) || f.name.contains(sessionId) || f.name.startsWith("echo_all_chunks_")) {
                 f.delete()
             }
         }
@@ -120,7 +120,10 @@ class LocalStore(val context: Context, val dao: JournalDao) {
         }
 
         val chunksArray = JSONArray()
-        val dbChunks = dao.chunks(sessionId).sortedBy { it.seq }
+        val dbChunks = dao.chunks(sessionId).sortedBy { it.seq }.filter {
+            val f = File(it.path)
+            f.exists() && f.length() > 44
+        }
         val chunksList = if (dbChunks.isNotEmpty()) {
             dbChunks
         } else {
@@ -130,7 +133,8 @@ class LocalStore(val context: Context, val dao: JournalDao) {
                     val meta = JSONObject(sidecar.readText())
                     val stem = sidecar.name.removeSuffix(".chunk.json")
                     val wav = File(dir, "$stem.wav")
-                    val count = if (wav.exists() && wav.length() > 44) ((wav.length() - 44) / 2).toInt() else 0
+                    if (!wav.exists() || wav.length() <= 44) return@runCatching null
+                    val count = ((wav.length() - 44) / 2).toInt()
                     LocalChunk(
                         meta.getString("id"),
                         meta.getString("session_id"),
@@ -138,7 +142,7 @@ class LocalStore(val context: Context, val dao: JournalDao) {
                         meta.getLong("start_sample"),
                         count,
                         wav.absolutePath,
-                        if (wav.exists()) checksum(wav) else "",
+                        checksum(wav),
                         meta.getLong("start_monotonic_ns"),
                         meta.optLong("clock_drift_ms", 0)
                     )

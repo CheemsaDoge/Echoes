@@ -47,6 +47,7 @@ abstract class JournalDao {
     @Query("UPDATE sessions SET state='deleted' WHERE id=:id") abstract suspend fun tombstone(id: String)
     @Query("SELECT * FROM chunks WHERE id=:id") abstract suspend fun chunk(id: String): LocalChunk?
     @Query("SELECT * FROM chunks WHERE sessionId=:id ORDER BY seq") abstract suspend fun chunks(id: String): List<LocalChunk>
+    @Query("SELECT * FROM chunks ORDER BY seq") abstract fun observeAllChunks(): Flow<List<LocalChunk>>
     @Query("SELECT * FROM chunks WHERE sessionId=:id AND uploadState='pending' ORDER BY seq") abstract suspend fun pending(id: String): List<LocalChunk>
     @Query("SELECT * FROM chunks WHERE sessionId IN (SELECT id FROM sessions WHERE purpose='calibration') ORDER BY rowid DESC LIMIT 1")
     abstract suspend fun latestCalibration(): LocalChunk?

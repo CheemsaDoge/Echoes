@@ -2,12 +2,22 @@ package dev.echoledger.app.data
 
 import android.content.Context
 import android.util.AtomicFile
+import dev.echoledger.core.SAMPLE_RATE
 import dev.echoledger.core.WavFile
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.security.MessageDigest
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 
-class LocalStore(context: Context, val dao: JournalDao) {
+class LocalStore(val context: Context, val dao: JournalDao) {
     val root = File(context.filesDir, "recordings").apply { mkdirs() }
     fun folder(sessionId: String) = File(root, sessionId).apply { mkdirs() }
     fun writeJson(file: File, json: JSONObject) {
@@ -70,5 +80,131 @@ class LocalStore(context: Context, val dao: JournalDao) {
         val directory = File(root, sessionId)
         check(!directory.exists() || directory.deleteRecursively()) { "Could not remove all local audio files" }
         dao.deleteChunks(sessionId) // Keep the local tombstone to prevent recovery/re-upload.
+    }
+
+    fun getSceneTag(sessionId: String): String {
+        val tagFile = File(folder(sessionId), "scene_tag.txt")
+        if (tagFile.exists()) {
+            val text = tagFile.readText().trim()
+            if (text.isNotBlank()) return text
+        }
+        return "未分类"
+    }
+
+    fun setSceneTag(sessionId: String, tag: String) {
+        val tagFile = File(folder(sessionId), "scene_tag.txt")
+        tagFile.writeText(tag.trim())
+    }
+
+    suspend fun exportMergedWav(sessionId: String): File = withContext(Dispatchers.IO) {
+        val session = dao.session(sessionId)
+        val startedAtMs = session?.startedAtMs ?: runCatching {
+            JSONObject(File(folder(sessionId), "session.json").readText()).getLong("started_at_ms")
+        }.getOrDefault(System.currentTimeMillis())
+        val timestamp = Instant.ofEpochMilli(startedAtMs).atZone(ZoneId.systemDefault())
+            .format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"))
+        val sceneTag = getSceneTag(sessionId)
+        val idPrefix = sessionId.take(6)
+        val exportDir = File(context.cacheDir, "exports").apply { mkdirs() }
+        val outputFile = File(exportDir, "echo_${timestamp}_${sceneTag}_${idPrefix}.wav")
+
+        val chunks = dao.chunks(sessionId)
+        val wavFiles = if (chunks.isNotEmpty()) {
+            chunks.map { File(it.path) }
+        } else {
+            val dir = folder(sessionId)
+            dir.listFiles()?.filter { it.extension == "wav" && !it.name.endsWith(".wav.part") }
+                ?.sortedBy { it.name } ?: emptyList()
+        }
+
+        require(wavFiles.isNotEmpty()) { "没有可合并导出的录音分块" }
+        for (f in wavFiles) {
+            require(f.exists() && f.length() > 44) { "音频分块无效或损坏: ${f.name}" }
+        }
+
+        val totalPcmBytes = wavFiles.sumOf { it.length() - 44 }
+        val tempFile = File(exportDir, "${outputFile.name}.tmp")
+        tempFile.outputStream().buffered().use { out ->
+            val header = ByteBuffer.allocate(44).order(ByteOrder.LITTLE_ENDIAN)
+            header.put("RIFF".toByteArray(Charsets.US_ASCII))
+            header.putInt((36 + totalPcmBytes).toInt())
+            header.put("WAVEfmt ".toByteArray(Charsets.US_ASCII))
+            header.putInt(16)
+            header.putShort(1.toShort())
+            header.putShort(1.toShort())
+            header.putInt(SAMPLE_RATE)
+            header.putInt(SAMPLE_RATE * 2)
+            header.putShort(2.toShort())
+            header.putShort(16.toShort())
+            header.put("data".toByteArray(Charsets.US_ASCII))
+            header.putInt(totalPcmBytes.toInt())
+            out.write(header.array())
+
+            val buffer = ByteArray(65536)
+            for (wav in wavFiles) {
+                wav.inputStream().buffered().use { input ->
+                    var skipped = 0L
+                    while (skipped < 44) {
+                        val n = input.skip(44 - skipped)
+                        if (n <= 0) break
+                        skipped += n
+                    }
+                    while (true) {
+                        val read = input.read(buffer)
+                        if (read < 0) break
+                        out.write(buffer, 0, read)
+                    }
+                }
+            }
+            out.flush()
+        }
+
+        if (outputFile.exists()) outputFile.delete()
+        if (!tempFile.renameTo(outputFile)) {
+            tempFile.copyTo(outputFile, overwrite = true)
+            tempFile.delete()
+        }
+        outputFile
+    }
+
+    suspend fun exportSessionZip(sessionId: String): File = withContext(Dispatchers.IO) {
+        val dir = folder(sessionId)
+        require(dir.exists() && dir.isDirectory) { "会话目录不存在" }
+        val session = dao.session(sessionId)
+        val startedAtMs = session?.startedAtMs ?: runCatching {
+            JSONObject(File(dir, "session.json").readText()).getLong("started_at_ms")
+        }.getOrDefault(System.currentTimeMillis())
+        val timestamp = Instant.ofEpochMilli(startedAtMs).atZone(ZoneId.systemDefault())
+            .format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"))
+        val sceneTag = getSceneTag(sessionId)
+        val idPrefix = sessionId.take(6)
+        val exportDir = File(context.cacheDir, "exports").apply { mkdirs() }
+        val outputFile = File(exportDir, "echo_${timestamp}_${sceneTag}_${idPrefix}_chunks.zip")
+        val tempFile = File(exportDir, "${outputFile.name}.tmp")
+
+        val filesToZip = dir.listFiles()?.filter { f ->
+            f.isFile && (f.name.endsWith(".wav") || f.name.endsWith(".chunk.json") ||
+                         f.name == "session.json" || f.name == "scene_tag.txt")
+        }?.sortedBy { it.name } ?: emptyList()
+
+        require(filesToZip.isNotEmpty()) { "会话目录下没有可打包的文件" }
+
+        ZipOutputStream(tempFile.outputStream().buffered()).use { zipOut ->
+            for (f in filesToZip) {
+                val entry = ZipEntry(f.name)
+                entry.time = f.lastModified()
+                zipOut.putNextEntry(entry)
+                f.inputStream().buffered().use { it.copyTo(zipOut) }
+                zipOut.closeEntry()
+            }
+            zipOut.finish()
+        }
+
+        if (outputFile.exists()) outputFile.delete()
+        if (!tempFile.renameTo(outputFile)) {
+            tempFile.copyTo(outputFile, overwrite = true)
+            tempFile.delete()
+        }
+        outputFile
     }
 }

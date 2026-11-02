@@ -29,7 +29,9 @@ class MicrophoneSource(context: Context, onSilenced: (Boolean) -> Unit) : PcmSou
     override fun stop() { if (record.recordingState == AudioRecord.RECORDSTATE_RECORDING) record.stop() }
     override fun close() {
         runCatching { stop() }
-        if (Build.VERSION.SDK_INT >= 29 && callback != null) runCatching { record.unregisterAudioRecordingCallback(callback) }
+        if (Build.VERSION.SDK_INT >= 29) {
+            callback?.let { cb -> runCatching { record.unregisterAudioRecordingCallback(cb) } }
+        }
         record.release()
     }
 }

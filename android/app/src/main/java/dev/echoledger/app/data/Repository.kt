@@ -75,8 +75,15 @@ class Repository(private val context: Context, val dao: JournalDao, val prefs: S
     }
     suspend fun deleteSession(id: String) {
         require(RecordingBus.state.value.sessionId != id || !RecordingBus.state.value.recording) { "Stop this recording first" }
-        try { api.call("/v1/sessions/$id", "DELETE") }
-        catch (e: ApiFailure) { if (e.status != 404 && e.status != 410) throw e }
+        if (prefs.token.isNotBlank()) {
+            try { 
+                api.call("/v1/sessions/$id", "DELETE") 
+            } catch (e: ApiFailure) { 
+                if (e.status != 404 && e.status != 410) throw e 
+            } catch (_: Exception) {
+                // Ignore network/backend failures for standalone local recordings
+            }
+        }
         local.remove(id)
         dao.clearCache()
     }

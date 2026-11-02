@@ -98,14 +98,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun disconnect() { realtime?.cancel(); realtime = null }
     fun selectDay(value: LocalDate) { day.value = value; refresh() }
     fun refresh() = act { repo.refresh(day.value); UploadScheduler.enqueue(getApplication()) }
-    fun act(block: suspend () -> Unit) {
-        viewModelScope.launch {
-            busy.value = true
-            try { graph.ready.await(); block() }
-            catch (cancel: CancellationException) { throw cancel }
-            catch (e: Exception) { repo.message.value = e.message?.take(220) ?: e.javaClass.simpleName }
-            finally { busy.value = false }
-        }
+    fun act(block: suspend CoroutineScope.() -> Unit): Job = viewModelScope.launch {
+        busy.value = true
+        try { graph.ready.await(); block() }
+        catch (cancel: CancellationException) { throw cancel }
+        catch (e: Exception) { repo.message.value = e.message?.take(220) ?: e.javaClass.simpleName }
+        finally { busy.value = false }
     }
     fun configure(url: String, token: String) = act { disconnect(); repo.configure(url, token); connect(); repo.refresh(day.value) }
     fun openEvent(id: String) = act { detail.value = repo.getEvent(id) }
@@ -138,32 +136,43 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private var playbackJob: Job? = null
+
     fun stopPlayback() {
+        playbackJob?.cancel()
+        playbackJob = null
         player?.release()
         player = null
         _playingSessionId.value = null
     }
 
-    fun playSession(sessionId: String) = act {
+    fun playSession(sessionId: String) {
         require(!recording.value.recording) { "正在录音中，无法播放回听" }
         if (_playingSessionId.value == sessionId) {
             stopPlayback()
-            return@act
+            return
         }
         stopPlayback()
-        val wav = repo.local.exportMergedWav(sessionId)
-        require(wav.exists() && wav.length() > 44) { "录音文件不存在或为空" }
-        val p = MediaPlayer.create(getApplication(), Uri.fromFile(wav)) ?: error("无法初始化播放器")
-        player = p
-        _playingSessionId.value = sessionId
-        p.setOnCompletionListener {
-            it.release()
-            if (player === it) {
-                player = null
-                _playingSessionId.value = null
+        playbackJob = act {
+            val wav = repo.local.exportMergedWav(sessionId)
+            require(wav.exists() && wav.length() > 44) { "录音文件不存在或为空" }
+            if (!isActive) return@act
+            val p = MediaPlayer.create(getApplication(), Uri.fromFile(wav)) ?: error("无法初始化播放器")
+            if (!isActive) {
+                p.release()
+                return@act
             }
+            player = p
+            _playingSessionId.value = sessionId
+            p.setOnCompletionListener {
+                it.release()
+                if (player === it) {
+                    player = null
+                    _playingSessionId.value = null
+                }
+            }
+            p.start()
         }
-        p.start()
     }
 
     fun setSessionSceneTag(sessionId: String, tag: String) {
@@ -172,27 +181,35 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun saveToDownloads(sessionId: String, asZip: Boolean = false) = act {
-        val file = if (asZip) repo.local.exportSessionZip(sessionId) else repo.local.exportMergedWav(sessionId)
-        val mimeType = if (asZip) "application/zip" else "audio/wav"
         val app = getApplication<Application>()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val values = ContentValues().apply {
-                put(MediaStore.MediaColumns.DISPLAY_NAME, file.name)
-                put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
-                put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/EchoLedger")
+        val savedName = withContext(Dispatchers.IO) {
+            val file = if (asZip) repo.local.exportSessionZip(sessionId) else repo.local.exportMergedWav(sessionId)
+            val mimeType = if (asZip) "application/zip" else "audio/wav"
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val values = ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, file.name)
+                    put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/EchoLedger")
+                }
+                val uri = app.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                    ?: error("无法在系统 Downloads 目录创建条目")
+                app.contentResolver.openOutputStream(uri)?.use { out ->
+                    file.inputStream().buffered().use { it.copyTo(out) }
+                } ?: error("无法写入系统 Downloads 文件")
+            } else {
+                @Suppress("DEPRECATION")
+                val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "EchoLedger").apply { mkdirs() }
+                val dest = File(dir, file.name)
+                try {
+                    file.copyTo(dest, overwrite = true)
+                } catch (_: Exception) {
+                    val fallbackDir = app.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: app.filesDir
+                    file.copyTo(File(fallbackDir, file.name), overwrite = true)
+                }
             }
-            val uri = app.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-                ?: error("无法在系统 Downloads 目录创建条目")
-            app.contentResolver.openOutputStream(uri)?.use { out ->
-                file.inputStream().buffered().use { it.copyTo(out) }
-            }
-        } else {
-            @Suppress("DEPRECATION")
-            val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "EchoLedger").apply { mkdirs() }
-            val dest = File(dir, file.name)
-            file.copyTo(dest, overwrite = true)
+            file.name
         }
-        repo.message.value = "已保存至 Download/EchoLedger/${file.name}"
+        repo.message.value = "已保存至 Download/EchoLedger/$savedName"
     }
 
     fun shareSession(context: Context, sessionId: String, asZip: Boolean = false) = act {
@@ -214,7 +231,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         if (_playingSessionId.value == id) stopPlayback()
         repo.deleteSession(id)
         tagVersion.value++
-        repo.refresh(day.value)
+        if (repo.prefs.token.isNotBlank()) {
+            runCatching { repo.refresh(day.value) }
+        }
     }
 
     override fun onCleared() {

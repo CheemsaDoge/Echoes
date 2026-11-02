@@ -69,30 +69,38 @@ def import_zip_to_dataset(zip_path: Path, dataset_path: Path) -> int:
 
     imported_count = 0
     with zipfile.ZipFile(zip_path, "r") as zf:
-        session_info = {}
+        # Pre-index session.json and scene_tag.txt by directory
+        session_info_by_dir: dict[str, dict] = {}
+        scene_tag_by_dir: dict[str, str] = {}
         for n in zf.namelist():
-            if n.endswith("session.json"):
+            p = str(Path(n).parent)
+            if p == ".":
+                p = ""
+            if Path(n).name == "session.json":
                 try:
-                    session_info = json.loads(zf.read(n).decode("utf-8"))
+                    session_info_by_dir[p] = json.loads(zf.read(n).decode("utf-8"))
                 except Exception:
                     pass
-
-        default_scene = "对话"
-        for n in zf.namelist():
-            if n.endswith("scene_tag.txt"):
+            elif Path(n).name == "scene_tag.txt":
                 try:
                     txt = zf.read(n).decode("utf-8").strip()
                     if txt:
-                        default_scene = txt
+                        scene_tag_by_dir[p] = txt
                 except Exception:
                     pass
 
         wav_names = [n for n in zf.namelist() if n.lower().endswith(".wav") and not n.startswith("__MACOSX")]
         wav_names.sort(key=lambda x: [int(c) if c.isdigit() else c.lower() for c in re.split(r"(\d+)", x)])
 
-        start_time_base = session_info.get("started_at_ms", int(time.time() * 1000))
-
+        cumulative_ms_by_dir: dict[str, int] = {}
         for idx, wname in enumerate(wav_names):
+            parent_dir = str(Path(wname).parent)
+            if parent_dir == ".":
+                parent_dir = ""
+            sess_info = session_info_by_dir.get(parent_dir) or session_info_by_dir.get("") or {}
+            scene = scene_tag_by_dir.get(parent_dir) or scene_tag_by_dir.get("") or "对话"
+            start_time_base = sess_info.get("started_at_ms", int(time.time() * 1000))
+
             cid = f"chunk_{Path(wname).stem}_{uuid.uuid4().hex[:6]}"
             target_wav = audio_dir / f"{cid}.wav"
             target_wav.write_bytes(zf.read(wname))
@@ -103,7 +111,22 @@ def import_zip_to_dataset(zip_path: Path, dataset_path: Path) -> int:
             rms = float(np.sqrt(np.mean(f_samples * f_samples))) if len(f_samples) > 0 else 0.0
             rms_dbfs = round(20.0 * math.log10(max(rms, 1e-6)), 2)
 
-            chunk_time_ms = start_time_base + int(idx * dur * 1000)
+            # Check if matching sidecar metadata exists
+            sidecar_name = str(Path(wname).with_suffix(".chunk.json"))
+            sidecar_meta = {}
+            if sidecar_name in zf.namelist():
+                try:
+                    sidecar_meta = json.loads(zf.read(sidecar_name).decode("utf-8"))
+                except Exception:
+                    pass
+
+            if "start_sample" in sidecar_meta:
+                offset_ms = int(sidecar_meta["start_sample"] * 1000 / 16000)
+            else:
+                offset_ms = cumulative_ms_by_dir.get(parent_dir, 0)
+            cumulative_ms_by_dir[parent_dir] = offset_ms + int(dur * 1000)
+
+            chunk_time_ms = start_time_base + offset_ms
             iso_time = datetime.datetime.fromtimestamp(chunk_time_ms / 1000.0).strftime("%Y-%m-%d %H:%M:%S")
 
             # Determine relative path from dataset_path.parent
@@ -112,15 +135,18 @@ def import_zip_to_dataset(zip_path: Path, dataset_path: Path) -> int:
             except ValueError:
                 rel_file = str(target_wav)
 
+            sess_id = sess_info.get("id") or (parent_dir if parent_dir else "imported_session")
+            seq_num = sidecar_meta.get("seq", idx)
+
             record = {
                 "id": cid,
-                "session_id": session_info.get("id", "imported_session"),
-                "seq": idx,
+                "session_id": sess_id,
+                "seq": seq_num,
                 "file": rel_file,
                 "duration_s": dur,
                 "recorded_at": iso_time,
                 "rms_dbfs": rms_dbfs,
-                "scene": default_scene,
+                "scene": scene,
                 "has_speech": True if rms_dbfs > -42.0 else False,
                 "should_detect": True if rms_dbfs > -38.0 else False,
                 "speaker": "",
@@ -129,21 +155,21 @@ def import_zip_to_dataset(zip_path: Path, dataset_path: Path) -> int:
                 "notes": "",
             }
             dataset["chunks"].append(record)
+            if scene not in dataset["scenes"]:
+                dataset["scenes"].append(scene)
             imported_count += 1
-
-    if default_scene not in dataset["scenes"]:
-        dataset["scenes"].append(default_scene)
 
     save_tui_dataset(dataset, dataset_path)
     return imported_count
 
 def run_tui_benchmark(dataset: dict, base_dir: Path, sweep: bool = False, output_path: Path | None = None) -> dict:
     chunks = dataset.get("chunks", [])
-    if not chunks:
-        print("❌ 数据集为空，无法执行评测。")
+    labeled_chunks = [c for c in chunks if c.get("labeled")]
+    if not labeled_chunks:
+        print("❌ 数据集中没有已标注审核的音频块，无法执行评测。请先进行标注后再运行评测。")
         return {}
-    print(f"\n🚀 开始执行多模型综合评测 (共 {len(chunks)} 个音频块)...")
-    report = run_comprehensive_evaluation(chunks, base_dir=base_dir, speaker_rounds=20)
+    print(f"\n🚀 开始执行多模型综合评测 (共 {len(labeled_chunks)} 个已标注音频块)...")
+    report = run_comprehensive_evaluation(labeled_chunks, base_dir=base_dir, speaker_rounds=20)
     md_text = format_comprehensive_markdown(report)
     print("\n" + md_text)
     if output_path:

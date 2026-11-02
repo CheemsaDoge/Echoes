@@ -141,9 +141,9 @@ def test_speaker_spot_check_edge_cases():
     ]
     assert "error" in spot_check_speaker_models(short_chunks)
 
-    # Chunks without known speaker
+    # Chunks without known speaker (including 未知路人)
     unknown_chunks = [
-        {"id": "c1", "speaker": "未知", "samples": np.zeros(16000, dtype=np.int16)},
+        {"id": "c1", "speaker": "未知路人", "samples": np.zeros(16000, dtype=np.int16)},
         {"id": "c2", "speaker": "路人", "samples": np.zeros(16000, dtype=np.int16)},
         {"id": "c3", "speaker": "", "samples": np.zeros(16000, dtype=np.int16)},
     ]
@@ -214,7 +214,11 @@ def test_workbench_gui_api_isolated(tmp_path, monkeypatch):
     r_audio_404 = client.get("/api/audio/non_existent_id")
     assert r_audio_404.status_code == 404
 
-    # 7. Update chunk label
+    # 7. Evaluate before labeling should be rejected
+    r_eval_unlabeled = client.post("/api/evaluate")
+    assert r_eval_unlabeled.status_code == 400
+
+    # 8. Update chunk labels
     r_lbl = client.post(f"/api/chunk/{c0['id']}/label", json={
         "scene": "深度研讨",
         "has_speech": True,
@@ -228,7 +232,15 @@ def test_workbench_gui_api_isolated(tmp_path, monkeypatch):
     assert updated["scene"] == "深度研讨"
     assert updated["speaker"] == "雷军"
 
-    # 8. Evaluate populated dataset
+    c1 = chunks[1]
+    r_lbl1 = client.post(f"/api/chunk/{c1['id']}/label", json={
+        "scene": "深度研讨",
+        "has_speech": False,
+        "should_detect": False,
+    })
+    assert r_lbl1.status_code == 200
+
+    # 9. Evaluate populated dataset
     r_eval = client.post("/api/evaluate")
     assert r_eval.status_code == 200
     eval_rep = r_eval.json()
@@ -261,7 +273,14 @@ def test_workbench_tui_functions(tmp_path):
     ds_imported = load_tui_dataset(dataset_file)
     assert len(ds_imported["chunks"]) == 2
 
-    # Test TUI benchmark execution
+    # Unlabeled evaluation should return empty
+    assert run_tui_benchmark(ds_imported, base_dir=dataset_file.parent) == {}
+
+    # Label chunks and run benchmark
+    for c in ds_imported["chunks"]:
+        c["labeled"] = True
+    save_tui_dataset(ds_imported, dataset_file)
+
     rep_md = tmp_path / "report.md"
     rep = run_tui_benchmark(ds_imported, base_dir=dataset_file.parent, output_path=rep_md)
     assert rep["chunks_evaluated"] == 2

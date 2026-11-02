@@ -137,7 +137,7 @@ def spot_check_speaker_models(
         return {"error": "Need at least 3 labeled chunks with audio for speaker evaluation"}
 
     # Separate known speakers and unknown/impostors
-    is_unknown = lambda spk: (not spk) or spk in ("未知", "路人", "unknown", "none", "未标记")
+    is_unknown = lambda spk: (not spk) or spk in ("未知", "路人", "未知路人", "unknown", "none", "未标记")
     known_speakers = set(c["speaker"] for c in valid_chunks if not is_unknown(c.get("speaker")))
     
     if len(known_speakers) < 1:
@@ -229,7 +229,7 @@ def spot_check_speaker_models(
                     correct = 0
                     known_total, known_correct = 0, 0
                     unknown_total, unknown_correct = 0, 0
-                    far_count, frr_count = 0, 0
+                    impostor_accept_count, frr_count, confusion_count = 0, 0, 0
 
                     for q in query_chunks:
                         true_spk = q.get("speaker", "")
@@ -243,7 +243,7 @@ def spot_check_speaker_models(
                                 unknown_correct += 1
                                 correct += 1
                             else:
-                                far_count += 1
+                                impostor_accept_count += 1
                         else:
                             known_total += 1
                             if pred_spk == true_spk:
@@ -252,7 +252,7 @@ def spot_check_speaker_models(
                             elif pred_spk is None:
                                 frr_count += 1
                             else:
-                                far_count += 1
+                                confusion_count += 1
 
                     acc = correct / len(query_chunks) if query_chunks else 1.0
                     round_accuracies.append(acc)
@@ -261,7 +261,7 @@ def spot_check_speaker_models(
                         round_frrs.append(frr_count / known_total)
                     if unknown_total > 0:
                         round_unknown_rejections.append(unknown_correct / unknown_total)
-                        round_fars.append(far_count / unknown_total)
+                        round_fars.append(impostor_accept_count / unknown_total)
 
                 avg_acc = float(np.mean(round_accuracies)) if round_accuracies else 0.0
                 if avg_acc > best_acc:

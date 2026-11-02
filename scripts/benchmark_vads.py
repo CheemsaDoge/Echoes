@@ -189,15 +189,18 @@ def run_comprehensive_evaluation(
                 raw_intervals = rec.get("speech_intervals", "")
 
                 if should_detect is None:
-                    if raw_intervals:
-                        should_detect = True
+                    if "speech_intervals" in rec:
+                        should_detect = bool(raw_intervals)
                     elif has_speech is not None:
                         should_detect = has_speech
                     else:
-                        should_detect = True
+                        should_detect = False
 
                 if has_speech is None:
-                    has_speech = should_detect
+                    if "speech_intervals" in rec:
+                        has_speech = bool(raw_intervals)
+                    else:
+                        has_speech = should_detect
 
                 # Chunk-level decision
                 if should_detect:
@@ -334,16 +337,14 @@ def run_comprehensive_evaluation(
         env_snippet.append(f"# Recommended VAD Provider (Overall F1={best_vad['f1_score']:.1%})")
         env_snippet.append(f"VAD_PROVIDER={best_vad['model']}")
         cfg_obj = best_vad["vad_config"]
-        env_snippet.append(f"VAD_THRESHOLD={cfg_obj['threshold']}")
-        env_snippet.append(f"VAD_PAD_MS={cfg_obj['pad_ms']}")
-        env_snippet.append(f"VAD_RETAIN_UNCERTAIN={str(cfg_obj['retain_uncertain']).lower()}")
+        env_snippet.append(f"# Calibrated VAD Profile parameters (configured via API / DB profile):")
+        env_snippet.append(f"# threshold={cfg_obj['threshold']}, pad_ms={cfg_obj['pad_ms']}, retain_uncertain={str(cfg_obj['retain_uncertain']).lower()}")
     if speaker_eval_report and speaker_eval_report.get("winner"):
-        env_snippet.append(f"\n# Recommended Speaker Embedding Extractor")
-        env_snippet.append(f"VOICE_MODEL_ID={speaker_eval_report['winner']}")
-        if speaker_eval_report.get("recommended_config"):
-            rc = speaker_eval_report["recommended_config"]
-            env_snippet.append(f"VOICE_MATCH_THRESHOLD={rc['threshold']}")
-            env_snippet.append(f"VOICE_MATCH_MARGIN={rc['margin']}")
+        rc = speaker_eval_report.get("recommended_config", {})
+        acc_str = f" Top-1 Acc={rc.get('accuracy', 1.0):.1%}" if rc else ""
+        env_snippet.append(f"\n# Recommended Speaker Embedding Model ({speaker_eval_report['winner']}{acc_str})")
+        if rc:
+            env_snippet.append(f"# Calibrated matching parameters: threshold={rc.get('threshold')}, margin={rc.get('margin')}")
 
     return {
         "timestamp": datetime.datetime.now().isoformat(),

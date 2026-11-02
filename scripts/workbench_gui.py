@@ -99,31 +99,38 @@ def import_zip_archive(zip_path: Path) -> int:
 
     imported_count = 0
     with zipfile.ZipFile(zip_path, "r") as zf:
-        # Try finding session.json for session metadata
-        session_info = {}
+        # Pre-index session.json and scene_tag.txt by directory
+        session_info_by_dir: dict[str, dict] = {}
+        scene_tag_by_dir: dict[str, str] = {}
         for n in zf.namelist():
-            if n.endswith("session.json"):
+            p = str(Path(n).parent)
+            if p == ".":
+                p = ""
+            if Path(n).name == "session.json":
                 try:
-                    session_info = json.loads(zf.read(n).decode("utf-8"))
+                    session_info_by_dir[p] = json.loads(zf.read(n).decode("utf-8"))
                 except Exception:
                     pass
-
-        # Try finding scene_tag.txt
-        default_scene = "对话"
-        for n in zf.namelist():
-            if n.endswith("scene_tag.txt"):
+            elif Path(n).name == "scene_tag.txt":
                 try:
                     txt = zf.read(n).decode("utf-8").strip()
-                    if txt: default_scene = txt
+                    if txt:
+                        scene_tag_by_dir[p] = txt
                 except Exception:
                     pass
 
         wav_names = [n for n in zf.namelist() if n.lower().endswith(".wav") and not n.startswith("__MACOSX")]
         wav_names.sort(key=lambda x: [int(c) if c.isdigit() else c.lower() for c in re.split(r"(\d+)", x)])
 
-        start_time_base = session_info.get("started_at_ms", int(time.time() * 1000))
-
+        cumulative_ms_by_dir: dict[str, int] = {}
         for idx, wname in enumerate(wav_names):
+            parent_dir = str(Path(wname).parent)
+            if parent_dir == ".":
+                parent_dir = ""
+            sess_info = session_info_by_dir.get(parent_dir) or session_info_by_dir.get("") or {}
+            scene = scene_tag_by_dir.get(parent_dir) or scene_tag_by_dir.get("") or "对话"
+            start_time_base = sess_info.get("started_at_ms", int(time.time() * 1000))
+
             cid = f"chunk_{Path(wname).stem}_{uuid.uuid4().hex[:6]}"
             target_wav = chunks_dir / f"{cid}.wav"
             target_wav.write_bytes(zf.read(wname))
@@ -131,22 +138,39 @@ def import_zip_archive(zip_path: Path) -> int:
             samples = read_wav_16k(target_wav)
             dur = round(len(samples) / 16000.0, 2)
             f_samples = samples.astype(np.float64) / 32768.0
-            rms = float(np.sqrt(np.mean(f_samples * f_samples)))
+            rms = float(np.sqrt(np.mean(f_samples * f_samples))) if len(f_samples) > 0 else 0.0
             rms_dbfs = round(20.0 * math.log10(max(rms, 1e-6)), 2)
 
-            # Estimate chunk timestamp
-            chunk_time_ms = start_time_base + int(idx * dur * 1000)
+            # Check if matching sidecar metadata exists
+            sidecar_name = str(Path(wname).with_suffix(".chunk.json"))
+            sidecar_meta = {}
+            if sidecar_name in zf.namelist():
+                try:
+                    sidecar_meta = json.loads(zf.read(sidecar_name).decode("utf-8"))
+                except Exception:
+                    pass
+
+            if "start_sample" in sidecar_meta:
+                offset_ms = int(sidecar_meta["start_sample"] * 1000 / 16000)
+            else:
+                offset_ms = cumulative_ms_by_dir.get(parent_dir, 0)
+            cumulative_ms_by_dir[parent_dir] = offset_ms + int(dur * 1000)
+
+            chunk_time_ms = start_time_base + offset_ms
             iso_time = datetime.datetime.fromtimestamp(chunk_time_ms / 1000.0).strftime("%Y-%m-%d %H:%M:%S")
+
+            sess_id = sess_info.get("id") or (parent_dir if parent_dir else "imported_session")
+            seq_num = sidecar_meta.get("seq", idx)
 
             record = {
                 "id": cid,
-                "session_id": session_info.get("id", "imported_session"),
-                "seq": idx,
+                "session_id": sess_id,
+                "seq": seq_num,
                 "file": str(target_wav.relative_to(wb_dir)),
                 "duration_s": dur,
                 "recorded_at": iso_time,
                 "rms_dbfs": rms_dbfs,
-                "scene": default_scene,
+                "scene": scene,
                 "has_speech": True if rms_dbfs > -42.0 else False,
                 "should_detect": True if rms_dbfs > -38.0 else False,
                 "speaker": "",
@@ -155,10 +179,9 @@ def import_zip_archive(zip_path: Path) -> int:
                 "notes": "",
             }
             dataset["chunks"].append(record)
+            if scene not in dataset["scenes"]:
+                dataset["scenes"].append(scene)
             imported_count += 1
-
-    if default_scene not in dataset["scenes"]:
-        dataset["scenes"].append(default_scene)
 
     save_dataset(dataset)
     return imported_count
@@ -234,7 +257,9 @@ def add_speaker(speaker: str = Form(...)):
 async def upload_zip(file: UploadFile = File(...)):
     if not file.filename.endswith(".zip"):
         raise HTTPException(status_code=400, detail="Only ZIP files are supported")
-    temp_zip = get_workbench_dir() / f"upload_{uuid.uuid4().hex[:8]}.zip"
+    wb_dir = get_workbench_dir()
+    wb_dir.mkdir(parents=True, exist_ok=True)
+    temp_zip = wb_dir / f"upload_{uuid.uuid4().hex[:8]}.zip"
     try:
         with open(temp_zip, "wb") as f:
             shutil.copyfileobj(file.file, f)
@@ -248,12 +273,16 @@ async def upload_zip(file: UploadFile = File(...)):
 def run_evaluation(sweep: bool = False):
     data = load_dataset()
     chunks = data.get("chunks", [])
-    if not chunks:
-        raise HTTPException(status_code=400, detail="Dataset is empty. Import chunks first.")
+    labeled_chunks = [c for c in chunks if c.get("labeled")]
+    if not labeled_chunks:
+        raise HTTPException(
+            status_code=400,
+            detail="No reviewed/labeled chunks found. Please review and mark ground truth labels (has_speech/should_detect) before running evaluation."
+        )
 
     # Execute comprehensive evaluation
     report = run_comprehensive_evaluation(
-        chunks,
+        labeled_chunks,
         base_dir=get_workbench_dir(),
         speaker_rounds=20,
     )
@@ -746,33 +775,83 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       }
     }
 
+    function escapeHtml(str) {
+      if (str === null || str === undefined) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
     function renderSidebar() {
       const container = document.getElementById('chunks-container');
-      container.innerHTML = state.chunks.map((c, i) => `
-        <div class="chunk-item ${i === state.currentIndex ? 'active' : ''}" onclick="selectChunk(${i})">
-          <div class="chunk-item-row">
-            <span class="chunk-id">${c.id.split('_').slice(0, 2).join('_')}</span>
-            <span class="chunk-badge ${c.labeled ? 'badge-labeled' : 'badge-pending'}">${c.labeled ? '已标注' : '未标注'}</span>
-          </div>
-          <div class="chunk-meta">
-            <span>⏱ ${c.duration_s}s</span>
-            <span>📍 ${c.scene}</span>
-            <span>${c.has_speech ? '🔊有人声' : '🔇静音'}</span>
-          </div>
-        </div>
-      `).join('');
+      container.innerHTML = '';
+      state.chunks.forEach((c, i) => {
+        const item = document.createElement('div');
+        item.className = `chunk-item ${i === state.currentIndex ? 'active' : ''}`;
+        item.onclick = () => selectChunk(i);
+
+        const row = document.createElement('div');
+        row.className = 'chunk-item-row';
+        const idSpan = document.createElement('span');
+        idSpan.className = 'chunk-id';
+        idSpan.textContent = c.id.split('_').slice(0, 2).join('_');
+        const badgeSpan = document.createElement('span');
+        badgeSpan.className = `chunk-badge ${c.labeled ? 'badge-labeled' : 'badge-pending'}`;
+        badgeSpan.textContent = c.labeled ? '已标注' : '未标注';
+        row.appendChild(idSpan);
+        row.appendChild(badgeSpan);
+
+        const meta = document.createElement('div');
+        meta.className = 'chunk-meta';
+        const durSpan = document.createElement('span');
+        durSpan.textContent = `⏱ ${c.duration_s}s`;
+        const sceneSpan = document.createElement('span');
+        sceneSpan.textContent = `📍 ${c.scene}`;
+        const spkSpan = document.createElement('span');
+        spkSpan.textContent = c.has_speech ? '🔊有人声' : '🔇静音';
+        meta.appendChild(durSpan);
+        meta.appendChild(sceneSpan);
+        meta.appendChild(spkSpan);
+
+        item.appendChild(row);
+        item.appendChild(meta);
+        container.appendChild(item);
+      });
     }
 
     function renderChips() {
       const sContainer = document.getElementById('scenes-chips');
-      sContainer.innerHTML = state.scenes.map(s => `
-        <div class="chip ${state.currentChunk?.scene === s ? 'selected' : ''}" onclick="setField('scene', '${s}')">${s}</div>
-      `).join('') + `<input class="chip-input" placeholder="+ 自定义场景" onkeydown="handleNewScene(event)">`;
+      sContainer.innerHTML = '';
+      state.scenes.forEach(s => {
+        const div = document.createElement('div');
+        div.className = `chip ${state.currentChunk?.scene === s ? 'selected' : ''}`;
+        div.textContent = s;
+        div.onclick = () => setField('scene', s);
+        sContainer.appendChild(div);
+      });
+      const sInput = document.createElement('input');
+      sInput.className = 'chip-input';
+      sInput.placeholder = '+ 自定义场景';
+      sInput.onkeydown = handleNewScene;
+      sContainer.appendChild(sInput);
 
       const spkContainer = document.getElementById('speakers-chips');
-      spkContainer.innerHTML = state.speakers.map(spk => `
-        <div class="chip ${state.currentChunk?.speaker === spk ? 'selected' : ''}" onclick="setField('speaker', '${spk}')">${spk}</div>
-      `).join('') + `<input class="chip-input" placeholder="+ 新增人物" onkeydown="handleNewSpeaker(event)">`;
+      spkContainer.innerHTML = '';
+      state.speakers.forEach(spk => {
+        const div = document.createElement('div');
+        div.className = `chip ${state.currentChunk?.speaker === spk ? 'selected' : ''}`;
+        div.textContent = spk;
+        div.onclick = () => setField('speaker', spk);
+        spkContainer.appendChild(div);
+      });
+      const spkInput = document.createElement('input');
+      spkInput.className = 'chip-input';
+      spkInput.placeholder = '+ 新增人物';
+      spkInput.onkeydown = handleNewSpeaker;
+      spkContainer.appendChild(spkInput);
     }
 
     async function selectChunk(index) {

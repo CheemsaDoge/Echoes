@@ -3,6 +3,13 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+def _default_vertex_model() -> str:
+    explicit = os.getenv("VERTEX_MODEL")
+    if explicit:
+        return explicit
+    loc = os.getenv("VERTEX_LOCATION", "global")
+    return "gemini-3.8-flash" if loc in {"global", "us", "eu"} else "gemini-2.5-flash"
+
 @dataclass(frozen=True)
 class Settings:
     data_dir: Path = field(default_factory=lambda: Path(os.getenv("DATA_DIR", "./data")))
@@ -14,7 +21,7 @@ class Settings:
     gemini_mode: str = field(default_factory=lambda: os.getenv("GEMINI_MODE", "transcribe"))
     vertex_project: str = field(default_factory=lambda: os.getenv("VERTEX_PROJECT_ID", os.getenv("GOOGLE_CLOUD_PROJECT", "")))
     vertex_location: str = field(default_factory=lambda: os.getenv("VERTEX_LOCATION", "global"))
-    vertex_model: str = field(default_factory=lambda: os.getenv("VERTEX_MODEL", "gemini-3.8-flash"))
+    vertex_model: str = field(default_factory=_default_vertex_model)
     vertex_credentials: str = field(default_factory=lambda: os.getenv("GOOGLE_APPLICATION_CREDENTIALS", ""))
     vertex_api_key: str = field(default_factory=lambda: os.getenv("VERTEX_API_KEY", ""))
     vertex_endpoint: str = field(default_factory=lambda: os.getenv("VERTEX_ENDPOINT", ""))

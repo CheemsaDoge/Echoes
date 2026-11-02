@@ -184,7 +184,7 @@ class VertexAiTranscriber:
         self,
         project: str = "",
         location: str = "global",
-        model: str = "gemini-3.8-flash",
+        model: str = "",
         credentials_path: str = "",
         api_key: str = "",
         endpoint: str = "",
@@ -192,7 +192,10 @@ class VertexAiTranscriber:
     ):
         self.project = project
         self.location = location or "global"
-        self.model = model or "gemini-3.8-flash"
+        if not model:
+            self.model = "gemini-3.8-flash" if self.location in {"global", "us", "eu"} else "gemini-2.5-flash"
+        else:
+            self.model = model
         self.credentials_path = credentials_path
         self.api_key = api_key
         self.endpoint_override = endpoint

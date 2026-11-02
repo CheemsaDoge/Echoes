@@ -123,11 +123,11 @@ def test_vertexai_url_resolution(monkeypatch):
     import google.auth.exceptions
     monkeypatch.setattr("google.auth.default", lambda scopes=None: (_ for _ in ()).throw(google.auth.exceptions.DefaultCredentialsError("No credentials")))
 
-    t_global = VertexAiTranscriber(project="p1", location="global", model="gemini-3.8-flash")
+    t_global = VertexAiTranscriber(project="p1", location="global")
     assert t_global.resolve_endpoint() == "https://aiplatform.googleapis.com/v1/projects/p1/locations/global/publishers/google/models/gemini-3.8-flash:generateContent"
 
-    t_reg = VertexAiTranscriber(project="p1", location="asia-east1", model="gemini-3.8-flash")
-    assert t_reg.resolve_endpoint() == "https://asia-east1-aiplatform.googleapis.com/v1/projects/p1/locations/asia-east1/publishers/google/models/gemini-3.8-flash:generateContent"
+    t_reg = VertexAiTranscriber(project="p1", location="asia-east1")
+    assert t_reg.resolve_endpoint() == "https://asia-east1-aiplatform.googleapis.com/v1/projects/p1/locations/asia-east1/publishers/google/models/gemini-2.5-flash:generateContent"
 
     t_express = VertexAiTranscriber(api_key="k1", project="", model="gemini-3.8-flash")
     assert t_express.resolve_endpoint() == "https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-3.8-flash:generateContent"

@@ -17,3 +17,5 @@ local.properties
 *.wav.part
 *.hprof
 artifacts/*.jar
+.tools/
+*.apk

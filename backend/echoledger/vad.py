@@ -14,13 +14,13 @@ class FrameScorer(Protocol):
 
 class PassthroughScorer:
     model_id = "passthrough-v1-no-detection"
-    def probabilities(self, samples):
+    def probabilities(self, samples: np.ndarray) -> np.ndarray:
         return np.ones(math.ceil(len(samples) / FRAME), dtype=np.float32)
 
 class EnergyDemoScorer:
     """Synthetic-test/demo ONLY. Energy is not reliable speech detection."""
     model_id = "energy-demo-v1-not-speech-detection"
-    def probabilities(self, samples):
+    def probabilities(self, samples: np.ndarray) -> np.ndarray:
         scores = []
         for i in range(0, len(samples), FRAME):
             frame = samples[i:i + FRAME].astype(np.float32) / 32768
@@ -29,7 +29,7 @@ class EnergyDemoScorer:
         return np.asarray(scores, dtype=np.float32)
 
 class SileroOnnxScorer:
-    """Silero's 16 kHz recurrent ONNX interface. Model weights are not bundled."""
+    """Silero's 16 kHz recurrent ONNX interface (v5). Model weights are not bundled."""
     def __init__(self, path: str):
         import onnxruntime as ort
         model = Path(path)
@@ -44,8 +44,7 @@ class SileroOnnxScorer:
         if names != {"input", "sr", "state"}:
             raise RuntimeError("Unsupported Silero ONNX signature; expected input/sr/state")
 
-    def probabilities(self, samples):
-        # Each call owns recurrent state; concurrent calibration calls cannot corrupt it.
+    def probabilities(self, samples: np.ndarray) -> np.ndarray:
         state = np.zeros((2, 1, 128), dtype=np.float32)
         context = np.zeros((1, 64), dtype=np.float32)
         audio = samples.astype(np.float32) / 32768.
@@ -60,14 +59,228 @@ class SileroOnnxScorer:
             context = inp[:, -64:]
         return np.asarray(scores, dtype=np.float32)
 
+class SileroV4OnnxScorer:
+    """Silero VAD v4 recurrent ONNX interface."""
+    def __init__(self, path: str):
+        import onnxruntime as ort
+        model = Path(path)
+        if not model.is_file():
+            raise RuntimeError(f"VAD model missing: {path}")
+        options = ort.SessionOptions()
+        options.intra_op_num_threads = 1
+        options.inter_op_num_threads = 1
+        self.session = ort.InferenceSession(str(model), sess_options=options, providers=["CPUExecutionProvider"])
+        self.model_id = "silero-v4-sha256:" + hashlib.sha256(model.read_bytes()).hexdigest()
+        names = {x.name for x in self.session.get_inputs()}
+        if not {"input", "sr", "h", "c"}.issubset(names):
+            raise RuntimeError("Unsupported Silero v4 ONNX signature; expected input/sr/h/c")
+
+    def probabilities(self, samples: np.ndarray) -> np.ndarray:
+        h = np.zeros((2, 1, 64), dtype=np.float32)
+        c = np.zeros((2, 1, 64), dtype=np.float32)
+        audio = samples.astype(np.float32) / 32768.0
+        scores = []
+        for i in range(0, len(audio), FRAME):
+            frame = audio[i:i + FRAME]
+            if len(frame) < FRAME:
+                frame = np.pad(frame, (0, FRAME - len(frame)))
+            prob, h, c = self.session.run(None, {
+                "input": frame.reshape(1, -1),
+                "sr": np.array(16000, dtype=np.int64),
+                "h": h,
+                "c": c,
+            })
+            scores.append(float(np.asarray(prob).reshape(-1)[0]))
+        return np.asarray(scores, dtype=np.float32)
+
+class SileroV3OnnxScorer:
+    """Silero VAD v3 recurrent ONNX interface."""
+    def __init__(self, path: str):
+        import onnxruntime as ort
+        model = Path(path)
+        if not model.is_file():
+            raise RuntimeError(f"VAD model missing: {path}")
+        options = ort.SessionOptions()
+        options.intra_op_num_threads = 1
+        options.inter_op_num_threads = 1
+        self.session = ort.InferenceSession(str(model), sess_options=options, providers=["CPUExecutionProvider"])
+        self.model_id = "silero-v3-sha256:" + hashlib.sha256(model.read_bytes()).hexdigest()
+
+    def probabilities(self, samples: np.ndarray) -> np.ndarray:
+        h0 = np.zeros((2, 1, 64), dtype=np.float32)
+        c0 = np.zeros((2, 1, 64), dtype=np.float32)
+        audio = samples.astype(np.float32) / 32768.0
+        scores = []
+        for i in range(0, len(audio), FRAME):
+            frame = audio[i:i + FRAME]
+            if len(frame) < FRAME:
+                frame = np.pad(frame, (0, FRAME - len(frame)))
+            out, h0, c0 = self.session.run(None, {
+                "input": frame.reshape(1, -1),
+                "h0": h0,
+                "c0": c0,
+            })
+            scores.append(float(out[0, 1, 0]))
+        return np.asarray(scores, dtype=np.float32)
+
+class TenVadOnnxScorer:
+    """TEN-framework neural VAD model (16kHz) powered by sherpa-onnx runtime."""
+    def __init__(self, path: str, threshold: float = 0.5):
+        import sherpa_onnx
+        model = Path(path)
+        if not model.is_file():
+            raise RuntimeError(f"VAD model missing: {path}")
+        self.model_path = str(model)
+        self.threshold = threshold
+        self.model_id = "ten-vad-sha256:" + hashlib.sha256(model.read_bytes()).hexdigest()
+
+    def probabilities(self, samples: np.ndarray) -> np.ndarray:
+        if len(samples) == 0:
+            return np.zeros(0, dtype=np.float32)
+        import sherpa_onnx
+        config = sherpa_onnx.VadModelConfig()
+        config.sample_rate = 16000
+        config.num_threads = 1
+        config.provider = "cpu"
+        config.ten_vad.model = self.model_path
+        config.ten_vad.threshold = self.threshold
+        config.ten_vad.min_silence_duration = 0.1
+        config.ten_vad.min_speech_duration = 0.1
+        config.ten_vad.window_size = 256
+        vad = sherpa_onnx.VadModel.create(config)
+
+        audio = samples.astype(np.float32) / 32768.0
+        scores = []
+        for i in range(0, len(audio), FRAME):
+            frame = audio[i:i + FRAME]
+            if len(frame) < FRAME:
+                frame = np.pad(frame, (0, FRAME - len(frame)))
+            s1 = 1.0 if vad.is_speech(frame[:256]) else 0.0
+            s2 = 1.0 if vad.is_speech(frame[256:]) else 0.0
+            scores.append(float((s1 + s2) / 2.0))
+        return np.asarray(scores, dtype=np.float32)
+
+class WebRtcScorer:
+    """Google WebRTC GMM VAD supporting modes 0, 1, 2, 3."""
+    def __init__(self, mode: int = 2):
+        import webrtcvad
+        if mode not in (0, 1, 2, 3):
+            raise ValueError(f"Invalid WebRTC VAD mode: {mode}, expected 0, 1, 2, or 3")
+        self.mode = mode
+        self.vad = webrtcvad.Vad(mode)
+        self.model_id = f"webrtc-mode-{mode}"
+
+    def probabilities(self, samples: np.ndarray) -> np.ndarray:
+        if len(samples) == 0:
+            return np.zeros(0, dtype=np.float32)
+        pcm = samples.astype(np.int16)
+        scores = []
+        sub_len = 160  # 10ms subframe at 16kHz
+        for i in range(0, len(pcm), FRAME):
+            frame = pcm[i:i + FRAME]
+            sub_scores = []
+            for j in range(0, len(frame) - sub_len + 1, sub_len):
+                sub = frame[j:j + sub_len].tobytes()
+                sub_scores.append(1.0 if self.vad.is_speech(sub, 16000) else 0.0)
+            if not sub_scores:
+                sub = np.pad(frame, (0, sub_len - len(frame))).tobytes()
+                sub_scores.append(1.0 if self.vad.is_speech(sub, 16000) else 0.0)
+            scores.append(float(np.mean(sub_scores)))
+        return np.asarray(scores, dtype=np.float32)
+
+def _find_model_path(candidates: list[str]) -> str:
+    for c in candidates:
+        if Path(c).is_file():
+            return c
+    return ""
+
 def make_scorer(name: str, model_path: str = "") -> FrameScorer:
     if name == "passthrough":
         return PassthroughScorer()
     if name == "energy_demo":
         return EnergyDemoScorer()
     if name == "silero":
+        # Keep strict backward-compatibility: if model_path is empty and not configured,
+        # SileroOnnxScorer("") raises RuntimeError("VAD model missing: configure VAD_MODEL_PATH")
         return SileroOnnxScorer(model_path)
-    raise ValueError("Unknown VAD provider")
+    if name == "silero_v5":
+        target = model_path or _find_model_path(["data/models/vad/silero_vad_v5.onnx", "data/models/silero_vad.onnx"])
+        if not target:
+            raise RuntimeError("VAD model missing: data/models/vad/silero_vad_v5.onnx")
+        return SileroOnnxScorer(target)
+    if name == "silero_v4":
+        target = model_path or _find_model_path(["data/models/vad/silero_vad_v4.onnx"])
+        if not target:
+            raise RuntimeError("VAD model missing: data/models/vad/silero_vad_v4.onnx")
+        return SileroV4OnnxScorer(target)
+    if name == "silero_v3":
+        target = model_path or _find_model_path(["data/models/vad/silero_vad_v3.onnx"])
+        if not target:
+            raise RuntimeError("VAD model missing: data/models/vad/silero_vad_v3.onnx")
+        return SileroV3OnnxScorer(target)
+    if name == "ten_vad":
+        target = model_path or _find_model_path(["data/models/vad/ten_vad.onnx"])
+        if not target:
+            raise RuntimeError("VAD model missing: data/models/vad/ten_vad.onnx")
+        return TenVadOnnxScorer(target)
+    if name == "ten_vad_int8":
+        target = model_path or _find_model_path(["data/models/vad/ten_vad_int8.onnx"])
+        if not target:
+            raise RuntimeError("VAD model missing: data/models/vad/ten_vad_int8.onnx")
+        return TenVadOnnxScorer(target)
+    if name == "webrtc":
+        return WebRtcScorer(mode=2)
+    if name.startswith("webrtc_"):
+        mode = int(name.split("_")[1])
+        return WebRtcScorer(mode=mode)
+    raise ValueError(f"Unknown VAD provider: {name}")
+
+def list_available_vads(models_dir: Path = Path("data/models/vad")) -> list[dict]:
+    """List all supported VAD providers and their local availability status."""
+    vads = [
+        {"id": "passthrough", "type": "rule", "ready": True, "description": "No filtering; keeps all audio"},
+        {"id": "energy_demo", "type": "rule", "ready": True, "description": "Synthetic energy demonstration only"},
+        {"id": "webrtc_0", "type": "gmm", "ready": True, "description": "WebRTC GMM (mode 0, least aggressive)"},
+        {"id": "webrtc_1", "type": "gmm", "ready": True, "description": "WebRTC GMM (mode 1, low aggressiveness)"},
+        {"id": "webrtc_2", "type": "gmm", "ready": True, "description": "WebRTC GMM (mode 2, moderate aggressiveness)"},
+        {"id": "webrtc_3", "type": "gmm", "ready": True, "description": "WebRTC GMM (mode 3, highly aggressive)"},
+        {
+            "id": "silero_v5",
+            "type": "neural_onnx",
+            "model_path": str(models_dir / "silero_vad_v5.onnx"),
+            "ready": (models_dir / "silero_vad_v5.onnx").is_file() or Path("data/models/silero_vad.onnx").is_file(),
+            "description": "Silero VAD v5 ONNX (recurrent, input/sr/state)",
+        },
+        {
+            "id": "silero_v4",
+            "type": "neural_onnx",
+            "model_path": str(models_dir / "silero_vad_v4.onnx"),
+            "ready": (models_dir / "silero_vad_v4.onnx").is_file(),
+            "description": "Silero VAD v4 ONNX (recurrent, input/sr/h/c)",
+        },
+        {
+            "id": "silero_v3",
+            "type": "neural_onnx",
+            "model_path": str(models_dir / "silero_vad_v3.onnx"),
+            "ready": (models_dir / "silero_vad_v3.onnx").is_file(),
+            "description": "Silero VAD v3 ONNX (recurrent, input/h0/c0)",
+        },
+        {
+            "id": "ten_vad",
+            "type": "neural_onnx",
+            "model_path": str(models_dir / "ten_vad.onnx"),
+            "ready": (models_dir / "ten_vad.onnx").is_file(),
+            "description": "TEN-framework VAD ONNX (16kHz)",
+        },
+        {
+            "id": "ten_vad_int8",
+            "type": "neural_onnx",
+            "model_path": str(models_dir / "ten_vad_int8.onnx"),
+            "ready": (models_dir / "ten_vad_int8.onnx").is_file(),
+            "description": "TEN-framework quantized INT8 VAD ONNX",
+        },
+    ]
+    return vads
 
 def runs(mask: np.ndarray) -> list[tuple[int, int]]:
     padded = np.pad(mask.astype(np.int8), (1, 1))

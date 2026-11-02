@@ -28,7 +28,11 @@ class Settings:
             raise ValueError("MCP_TOKEN must be a distinct random secret of at least 24 characters.")
         if self.asr_provider not in {"disabled", "mock", "gemini"}:
             raise ValueError("Unknown ASR_PROVIDER")
-        if self.vad_provider not in {"passthrough", "energy_demo", "silero"}:
+        valid_vads = {
+            "passthrough", "energy_demo", "silero", "silero_v5", "silero_v4", "silero_v3",
+            "ten_vad", "ten_vad_int8", "webrtc", "webrtc_0", "webrtc_1", "webrtc_2", "webrtc_3"
+        }
+        if self.vad_provider not in valid_vads:
             raise ValueError("Unknown VAD_PROVIDER")
         if self.gemini_mode not in {"transcribe", "structured"}:
             raise ValueError("Unknown GEMINI_MODE")

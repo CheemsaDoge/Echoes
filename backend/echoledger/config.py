@@ -14,7 +14,7 @@ class Settings:
     gemini_mode: str = field(default_factory=lambda: os.getenv("GEMINI_MODE", "transcribe"))
     vertex_project: str = field(default_factory=lambda: os.getenv("VERTEX_PROJECT_ID", os.getenv("GOOGLE_CLOUD_PROJECT", "")))
     vertex_location: str = field(default_factory=lambda: os.getenv("VERTEX_LOCATION", "global"))
-    vertex_model: str = field(default_factory=lambda: os.getenv("VERTEX_MODEL", "gemini-2.5-flash"))
+    vertex_model: str = field(default_factory=lambda: os.getenv("VERTEX_MODEL", "gemini-3.8-flash"))
     vertex_credentials: str = field(default_factory=lambda: os.getenv("GOOGLE_APPLICATION_CREDENTIALS", ""))
     vertex_api_key: str = field(default_factory=lambda: os.getenv("VERTEX_API_KEY", ""))
     vertex_endpoint: str = field(default_factory=lambda: os.getenv("VERTEX_ENDPOINT", ""))

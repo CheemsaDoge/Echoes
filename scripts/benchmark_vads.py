@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Comprehensive benchmark and evaluation runner for multiple 16kHz VAD models.
-Evaluates accuracy (speech recall, silence/noise removal rate, false retained rate),
-latency, and RTF overall and grouped by acoustic scene (喧闹, 谈话, 安静, 谈话者声音小).
-Outputs Markdown tables and JSON reports.
+"""Comprehensive benchmark and model selection runner for 16kHz VAD and Speaker Recognition.
+Supports chunk-level dual ground-truth ('has_speech' and 'should_detect'), multi-scene evaluation,
+and Stratified Random Spot-Check for speaker identification models.
 """
 from __future__ import annotations
 import argparse
@@ -13,9 +12,18 @@ import math
 import os
 from pathlib import Path
 import re
+import sys
 import time
 import wave
 import numpy as np
+
+# Ensure repository root and backend directory are in sys.path
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+BACKEND_DIR = REPO_ROOT / "backend"
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
 
 from echoledger.models import VadConfig
 from echoledger.vad import (
@@ -26,9 +34,13 @@ from echoledger.vad import (
     score_intervals,
 )
 from echoledger.audio import merge_intervals
+from echoledger.speakers import (
+    list_available_speaker_models,
+    spot_check_speaker_models,
+)
 
 def parse_intervals(interval_str: str, sr: int = 16000) -> list[tuple[int, int]]:
-    s = interval_str.strip()
+    s = str(interval_str or "").strip()
     if not s:
         return []
     res = []
@@ -43,7 +55,7 @@ def parse_intervals(interval_str: str, sr: int = 16000) -> list[tuple[int, int]]
             res.append((int(round(start_s * sr)), int(round(end_s * sr))))
     return res
 
-def read_wav_16k(path: Path) -> np.ndarray:
+def read_wav_16k(path: Path | str) -> np.ndarray:
     with wave.open(str(path), "rb") as wf:
         sr = wf.getframerate()
         ch = wf.getnchannels()
@@ -60,114 +72,211 @@ def read_wav_16k(path: Path) -> np.ndarray:
         samples = np.interp(orig_indices, np.arange(len(samples)), samples).astype(np.int16)
     return samples
 
-def run_benchmark_on_dataset(
-    slices: list[dict],
-    models: list[str],
-    configs: list[tuple[str, VadConfig]],
-    base_dir: Path,
+def run_comprehensive_evaluation(
+    dataset_records: list[dict],
+    vad_models: list[str] | None = None,
+    configs: list[tuple[str, VadConfig]] | None = None,
+    base_dir: Path = Path("."),
+    speaker_rounds: int = 25,
 ) -> dict:
-    # Preload audio into memory
-    audio_cache = {}
+    """Core evaluation engine analyzing both VAD models and Speaker Embedding models across chunks.
+    
+    Each record in dataset_records can contain:
+      - 'id' / 'chunk_id': str
+      - 'file' / 'wav_path': str
+      - 'samples': np.ndarray (optional, if preloaded)
+      - 'scene': str (e.g. '喧闹', '安静', '对话', '讲课')
+      - 'has_speech': bool | None (whether chunk actually contains human speech)
+      - 'should_detect': bool | None (whether VAD should trigger detection on this chunk)
+      - 'speaker': str | None (person label, or '未知路人' / '')
+      - 'speech_intervals': str (fine-grained intervals)
+    """
+    # 1. Preload audio into memory
+    loaded_records = []
     total_audio_sec = 0.0
-    for item in slices:
-        wav_path = base_dir / item["file"]
-        if not wav_path.is_file():
-            # Try relative to cwd or item['file'] directly
-            if Path(item["file"]).is_file():
-                wav_path = Path(item["file"])
-            else:
-                raise FileNotFoundError(f"Slice audio file not found: {wav_path}")
-        audio_data = read_wav_16k(wav_path)
-        audio_cache[item["id"]] = audio_data
-        total_audio_sec += len(audio_data) / 16000.0
 
-    results = []
+    for item in dataset_records:
+        rec = dict(item)
+        if "samples" in rec and rec["samples"] is not None:
+            samples = rec["samples"]
+        else:
+            rel_file = rec.get("file") or rec.get("wav_path") or ""
+            wav_path = base_dir / rel_file
+            if not wav_path.is_file():
+                if Path(rel_file).is_file():
+                    wav_path = Path(rel_file)
+                else:
+                    continue
+            samples = read_wav_16k(wav_path)
+        rec["samples"] = samples
+        total_audio_sec += len(samples) / 16000.0
+        loaded_records.append(rec)
 
-    for model_name in models:
+    if not loaded_records:
+        return {"error": "No valid chunk audio files found in dataset"}
+
+    # 2. Setup VAD models and configurations
+    if vad_models is None:
+        avail_vads = list_available_vads()
+        vad_models = [v["id"] for v in avail_vads if v.get("ready") and v["id"] not in ("passthrough", "energy_demo")]
+
+    if configs is None:
+        configs = [
+            ("default", VadConfig(threshold=0.5, pad_ms=64, retain_uncertain=True)),
+            ("conservative", VadConfig(threshold=0.35, pad_ms=96, retain_uncertain=True)),
+            ("aggressive", VadConfig(threshold=0.65, pad_ms=32, retain_uncertain=False)),
+        ]
+
+    # 3. Benchmark VAD models
+    vad_results = []
+    model_scores = {}
+
+    for model_name in vad_models:
         try:
             scorer = make_scorer(model_name)
-        except Exception as e:
-            print(f"Skipping model '{model_name}': initialization failed ({e})")
+        except Exception:
             continue
 
-        # Compute probabilities and benchmark inference latency
-        model_scores = {}
         total_inf_time = 0.0
+        chunk_probs = {}
 
-        for item in slices:
-            samples = audio_cache[item["id"]]
-            audio_sec = len(samples) / 16000.0
-
+        for rec in loaded_records:
+            samples = rec["samples"]
             t0 = time.perf_counter()
             probs = scorer.probabilities(samples)
             inf_dur = time.perf_counter() - t0
-
             total_inf_time += inf_dur
-            model_scores[item["id"]] = (probs, inf_dur)
+            chunk_probs[rec.get("id") or rec.get("chunk_id")] = probs
 
-        avg_latency_ms = (total_inf_time * 1000.0) / max(1, len(slices))
+        avg_latency_ms = (total_inf_time * 1000.0) / len(loaded_records)
         rtf = total_inf_time / max(1e-6, total_audio_sec)
+        model_scores[model_name] = (chunk_probs, avg_latency_ms, rtf)
 
         for cfg_name, vad_cfg in configs:
-            # Overall counters
-            tot_n = 0
-            tot_gold = 0
-            tot_pred = 0
-            tot_tp = 0
+            # Chunk-level confusion metrics
+            # Condition Positive = should_detect is True (or has speech_intervals / has_speech)
+            total_chunks = len(loaded_records)
+            chunk_tp, chunk_fp, chunk_fn, chunk_tn = 0, 0, 0, 0
+            
+            # Sub-metrics: Speech missed count & Ambient noise false alarm count
+            true_speech_missed = 0
+            noise_false_alarm = 0
+            unwanted_speech_suppressed = 0
 
-            # Scene-wise counters: scene -> dict
-            scenes = {}
+            # Fine-grained sample-level metrics (when intervals are available)
+            tot_samples = 0
+            tot_gold_samples = 0
+            tot_pred_samples = 0
+            tot_tp_samples = 0
 
-            for item in slices:
-                samples = audio_cache[item["id"]]
+            # Scene-wise stats: scene_name -> dict
+            scene_breakdown: dict[str, dict] = {}
+
+            for rec in loaded_records:
+                cid = rec.get("id") or rec.get("chunk_id")
+                samples = rec["samples"]
                 n = len(samples)
-                probs, _ = model_scores[item["id"]]
-                truth = parse_intervals(item.get("speech_intervals", ""))
+                probs = chunk_probs[cid]
 
-                pred = speech_intervals(probs, n, vad_cfg)
-                pred_merged = merge_intervals(pred, n)
-                gold_merged = merge_intervals(truth, n)
+                pred_intervals = speech_intervals(probs, n, vad_cfg)
+                pred_samples_len = sum(b - a for a, b in pred_intervals)
+                vad_detected = (pred_samples_len > 0)
 
-                pred_n = sum(b - a for a, b in pred_merged)
-                gold_n = sum(b - a for a, b in gold_merged)
-                tp = sum(max(0, min(b, d) - max(a, c)) for a, b in pred_merged for c, d in gold_merged)
+                # Ground truth resolution:
+                # 1. Direct explicit should_detect
+                should_detect = rec.get("should_detect")
+                has_speech = rec.get("has_speech")
+                raw_intervals = rec.get("speech_intervals", "")
 
-                tot_n += n
-                tot_gold += gold_n
-                tot_pred += pred_n
-                tot_tp += tp
+                if should_detect is None:
+                    if raw_intervals:
+                        should_detect = True
+                    elif has_speech is not None:
+                        should_detect = has_speech
+                    else:
+                        should_detect = True
 
-                sc = item.get("scene", "未归类")
-                if sc not in scenes:
-                    scenes[sc] = {"n": 0, "gold": 0, "pred": 0, "tp": 0}
-                scenes[sc]["n"] += n
-                scenes[sc]["gold"] += gold_n
-                scenes[sc]["pred"] += pred_n
-                scenes[sc]["tp"] += tp
+                if has_speech is None:
+                    has_speech = should_detect
 
-            tot_negative = tot_n - tot_gold
-            tot_fn = tot_gold - tot_tp
-            tot_fp = tot_pred - tot_tp
+                # Chunk-level decision
+                if should_detect:
+                    if vad_detected:
+                        chunk_tp += 1
+                    else:
+                        chunk_fn += 1
+                        if has_speech:
+                            true_speech_missed += 1
+                else:
+                    if vad_detected:
+                        chunk_fp += 1
+                        if not has_speech:
+                            noise_false_alarm += 1
+                    else:
+                        chunk_tn += 1
+                        if has_speech:
+                            unwanted_speech_suppressed += 1
 
-            recall = tot_tp / tot_gold if tot_gold > 0 else (1.0 if tot_pred == 0 else 0.0)
-            removed_frac = 1.0 - (tot_pred / tot_n) if tot_n > 0 else 0.0
-            non_speech_retained = tot_fp / tot_negative if tot_negative > 0 else 0.0
+                # Sample-level tracking
+                gold_intervals = parse_intervals(raw_intervals)
+                if gold_intervals:
+                    pred_m = merge_intervals(pred_intervals, n)
+                    gold_m = merge_intervals(gold_intervals, n)
+                    p_n = sum(b - a for a, b in pred_m)
+                    g_n = sum(b - a for a, b in gold_m)
+                    tp_s = sum(max(0, min(b, d) - max(a, c)) for a, b in pred_m for c, d in gold_m)
+                    tot_samples += n
+                    tot_gold_samples += g_n
+                    tot_pred_samples += p_n
+                    tot_tp_samples += tp_s
 
-            scene_results = {}
-            for sc_name, sc_data in scenes.items():
-                s_neg = sc_data["n"] - sc_data["gold"]
-                s_fp = sc_data["pred"] - sc_data["tp"]
-                s_rec = sc_data["tp"] / sc_data["gold"] if sc_data["gold"] > 0 else 1.0
-                s_rem = 1.0 - (sc_data["pred"] / sc_data["n"]) if sc_data["n"] > 0 else 0.0
-                s_ns_ret = s_fp / s_neg if s_neg > 0 else 0.0
-                scene_results[sc_name] = {
-                    "recall": s_rec,
-                    "removed_fraction": s_rem,
-                    "non_speech_retained_rate": s_ns_ret,
-                    "slices_count": sum(1 for s in slices if s.get("scene") == sc_name),
+                # Scene tracking
+                scene = rec.get("scene") or "未分类"
+                sc_dict = scene_breakdown.setdefault(scene, {
+                    "total": 0, "tp": 0, "fp": 0, "fn": 0, "tn": 0, "pred_samples": 0, "tot_samples": 0
+                })
+                sc_dict["total"] += 1
+                sc_dict["tot_samples"] += n
+                sc_dict["pred_samples"] += pred_samples_len
+                if should_detect:
+                    if vad_detected: sc_dict["tp"] += 1
+                    else: sc_dict["fn"] += 1
+                else:
+                    if vad_detected: sc_dict["fp"] += 1
+                    else: sc_dict["tn"] += 1
+
+            # Compute rates
+            condition_pos = chunk_tp + chunk_fn
+            condition_neg = chunk_tn + chunk_fp
+            chunk_accuracy = (chunk_tp + chunk_tn) / total_chunks if total_chunks else 0.0
+            chunk_recall = chunk_tp / condition_pos if condition_pos else 1.0
+            chunk_specificity = chunk_tn / condition_neg if condition_neg else 1.0
+            
+            precision = chunk_tp / (chunk_tp + chunk_fp) if (chunk_tp + chunk_fp) else 0.0
+            f1_score = (2 * precision * chunk_recall) / (precision + chunk_recall) if (precision + chunk_recall) else 0.0
+
+            tot_samples_all = sum(sc["tot_samples"] for sc in scene_breakdown.values())
+            tot_pred_samples_all = sum(sc["pred_samples"] for sc in scene_breakdown.values())
+            overall_rem = 1.0 - (tot_pred_samples_all / tot_samples_all) if tot_samples_all else 0.0
+
+            # Scene-level computed summaries
+            scenes_out = {}
+            for sc_name, sc_data in scene_breakdown.items():
+                sc_p = sc_data["tp"] + sc_data["fn"]
+                sc_n = sc_data["tn"] + sc_data["fp"]
+                sc_rec = sc_data["tp"] / sc_p if sc_p else 1.0
+                sc_spec = sc_data["tn"] / sc_n if sc_n else 1.0
+                sc_acc = (sc_data["tp"] + sc_data["tn"]) / sc_data["total"] if sc_data["total"] else 0.0
+                sc_rem = 1.0 - (sc_data["pred_samples"] / sc_data["tot_samples"]) if sc_data["tot_samples"] else 0.0
+                scenes_out[sc_name] = {
+                    "chunks_count": sc_data["total"],
+                    "accuracy": round(sc_acc, 4),
+                    "speech_recall": round(sc_rec, 4),
+                    "noise_rejection": round(sc_spec, 4),
+                    "removed_fraction": round(sc_rem, 4),
                 }
 
-            results.append({
+            vad_results.append({
                 "model": model_name,
                 "config": cfg_name,
                 "vad_config": {
@@ -176,88 +285,173 @@ def run_benchmark_on_dataset(
                     "pad_ms": vad_cfg.pad_ms,
                     "retain_uncertain": vad_cfg.retain_uncertain,
                 },
-                "speech_recall": recall,
-                "removed_fraction": removed_frac,
-                "non_speech_retained_rate": non_speech_retained,
-                "missed_speech_ms": tot_fn * 1000.0 / 16000.0,
-                "false_retained_ms": tot_fp * 1000.0 / 16000.0,
+                "chunk_accuracy": round(chunk_accuracy, 4),
+                "speech_recall": round(chunk_recall, 4),
+                "noise_rejection": round(chunk_specificity, 4),
+                "removed_fraction": round(overall_rem, 4),
+                "f1_score": round(f1_score, 4),
+                "true_speech_missed": true_speech_missed,
+                "noise_false_alarms": noise_false_alarm,
                 "latency_ms": round(avg_latency_ms, 2),
                 "rtf": round(rtf, 5),
-                "scenes": scene_results,
+                "scenes": scenes_out,
             })
 
-    return {
-        "slices_evaluated": len(slices),
-        "total_audio_seconds": round(total_audio_sec, 2),
-        "results": results,
-    }
+    # Rank VAD models by F1-score, then accuracy, then latency
+    vad_results.sort(key=lambda x: (x["f1_score"], x["chunk_accuracy"], -x["latency_ms"]), reverse=True)
+    best_vad = vad_results[0] if vad_results else None
 
-def format_markdown_report(report_data: dict) -> str:
-    lines = []
-    lines.append("# VAD Models Benchmark & Evaluation Report\n")
-    lines.append(f"- **Evaluated slices**: {report_data['slices_evaluated']}")
-    lines.append(f"- **Total audio duration**: {report_data['total_audio_seconds']}s")
-    lines.append(f"- **Generated at**: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-
-    lines.append("## 1. Overall Performance Comparison\n")
-    lines.append("| Model | Config | Speech Recall | Removed Frac | Non-Speech Retained | Latency/slice | RTF |")
-    lines.append("| :--- | :--- | :---: | :---: | :---: | :---: | :---: |")
-
-    for r in report_data["results"]:
-        rec_str = f"{r['speech_recall']*100:.1f}%"
-        rem_str = f"{r['removed_fraction']*100:.1f}%"
-        ns_ret_str = f"{r['non_speech_retained_rate']*100:.1f}%"
-        lines.append(f"| `{r['model']}` | {r['config']} | **{rec_str}** | {rem_str} | {ns_ret_str} | {r['latency_ms']:.1f}ms | {r['rtf']:.4f} |")
-
-    # Group by scene
+    # Scene-specific best VAD recommendations
     all_scenes = set()
-    for r in report_data["results"]:
+    for r in vad_results:
         all_scenes.update(r["scenes"].keys())
 
-    if all_scenes:
-        lines.append("\n## 2. Performance Breakdown by Scene\n")
-        for sc in sorted(all_scenes):
-            lines.append(f"### Scene: `{sc}`\n")
-            lines.append("| Model | Config | Scene Speech Recall | Scene Removed Frac | False Retain Rate |")
-            lines.append("| :--- | :--- | :---: | :---: | :---: |")
-            for r in report_data["results"]:
-                sc_res = r["scenes"].get(sc)
-                if sc_res:
-                    s_rec = f"{sc_res['recall']*100:.1f}%"
-                    s_rem = f"{sc_res['removed_fraction']*100:.1f}%"
-                    s_ns = f"{sc_res['non_speech_retained_rate']*100:.1f}%"
-                    lines.append(f"| `{r['model']}` | {r['config']} | {s_rec} | {s_rem} | {s_ns} |")
-            lines.append("")
+    scene_recommendations = {}
+    for sc in sorted(all_scenes):
+        best_sc_entry = max(vad_results, key=lambda r: (
+            r["scenes"].get(sc, {}).get("accuracy", 0),
+            r["scenes"].get(sc, {}).get("speech_recall", 0),
+            -r["latency_ms"]
+        ))
+        scene_recommendations[sc] = {
+            "recommended_model": best_sc_entry["model"],
+            "config": best_sc_entry["config"],
+            "stats": best_sc_entry["scenes"].get(sc, {}),
+        }
+
+    # 4. Speaker Embedding Model Spot-Check (if any speaker labels exist)
+    speaker_eval_report = None
+    chunks_with_speaker = [c for c in loaded_records if c.get("speaker")]
+    if len(chunks_with_speaker) >= 3:
+        speaker_eval_report = spot_check_speaker_models(
+            chunks_with_speaker,
+            rounds=speaker_rounds,
+        )
+
+    # 5. Recommended .env configuration generator
+    env_snippet = []
+    if best_vad:
+        env_snippet.append(f"# Recommended VAD Provider (Overall F1={best_vad['f1_score']:.1%})")
+        env_snippet.append(f"VAD_PROVIDER={best_vad['model']}")
+        cfg_obj = best_vad["vad_config"]
+        env_snippet.append(f"VAD_THRESHOLD={cfg_obj['threshold']}")
+        env_snippet.append(f"VAD_PAD_MS={cfg_obj['pad_ms']}")
+        env_snippet.append(f"VAD_RETAIN_UNCERTAIN={str(cfg_obj['retain_uncertain']).lower()}")
+    if speaker_eval_report and speaker_eval_report.get("winner"):
+        env_snippet.append(f"\n# Recommended Speaker Embedding Extractor")
+        env_snippet.append(f"VOICE_MODEL_ID={speaker_eval_report['winner']}")
+        if speaker_eval_report.get("recommended_config"):
+            rc = speaker_eval_report["recommended_config"]
+            env_snippet.append(f"VOICE_MATCH_THRESHOLD={rc['threshold']}")
+            env_snippet.append(f"VOICE_MATCH_MARGIN={rc['margin']}")
+
+    return {
+        "timestamp": datetime.datetime.now().isoformat(),
+        "chunks_evaluated": len(loaded_records),
+        "slices_evaluated": len(loaded_records),
+        "total_audio_seconds": round(total_audio_sec, 2),
+        "best_vad": best_vad,
+        "scene_recommendations": scene_recommendations,
+        "vad_rankings": vad_results,
+        "results": vad_results,
+        "speaker_evaluation": speaker_eval_report,
+        "recommended_env": "\n".join(env_snippet),
+    }
+
+def format_comprehensive_markdown(report: dict) -> str:
+    lines = []
+    lines.append("# Echoes Multi-Day VAD & Speaker Recognition Comprehensive Benchmark\n")
+    lines.append(f"- **Total Chunks Evaluated**: {report['chunks_evaluated']}")
+    lines.append(f"- **Total Audio Duration**: {report['total_audio_seconds']}s")
+    lines.append(f"- **Timestamp**: {report['timestamp']}\n")
+
+    # 1. Best VAD Winner Banner
+    best = report.get("best_vad")
+    if best:
+        lines.append("## 🏆 Recommended VAD Model & Settings\n")
+        lines.append(f"> **Optimal Provider**: `{best['model']}` ({best['config']})\n")
+        lines.append(f"> - **Chunk Accuracy**: **{best['chunk_accuracy']*100:.1f}%**")
+        lines.append(f"> - **Speech Recall (Anti-Leak)**: **{best['speech_recall']*100:.1f}%** (Missed: {best['true_speech_missed']} chunks)")
+        lines.append(f"> - **Noise Rejection (Anti-False-Alarm)**: **{best['noise_rejection']*100:.1f}%** (False alarms: {best['noise_false_alarms']} chunks)")
+        lines.append(f"> - **F1-Score**: **{best['f1_score']:.4f}** | Latency: **{best['latency_ms']:.1f}ms** (RTF: {best['rtf']:.4f})\n")
+
+    # 2. VAD Rankings Table
+    lines.append("## 📊 VAD Model Comprehensive Leaderboard\n")
+    lines.append("| Rank | Model | Config | Accuracy | Recall (防漏检) | Rejection (防误触) | F1-Score | Latency | RTF |")
+    lines.append("| :---: | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: |")
+
+    for i, r in enumerate(report.get("vad_rankings", [])[:15], 1):
+        lines.append(
+            f"| {i} | `{r['model']}` | {r['config']} | "
+            f"**{r['chunk_accuracy']*100:.1f}%** | {r['speech_recall']*100:.1f}% | "
+            f"{r['noise_rejection']*100:.1f}% | {r['f1_score']:.4f} | "
+            f"{r['latency_ms']:.1f}ms | {r['rtf']:.4f} |"
+        )
+
+    # 3. Scene Breakdown
+    lines.append("\n## 🏙️ Performance Breakdown by Scene\n")
+    scene_recs = report.get("scene_recommendations", {})
+    for sc, info in scene_recs.items():
+        st = info["stats"]
+        lines.append(f"### Scene: `{sc}` ({st.get('chunks_count', 0)} chunks)")
+        lines.append(f"- **Top Model for this scene**: `{info['recommended_model']}` ({info['config']})")
+        lines.append(f"- Scene Accuracy: **{st.get('accuracy', 0)*100:.1f}%** | Recall: **{st.get('speech_recall', 0)*100:.1f}%** | Noise Rejection: **{st.get('noise_rejection', 0)*100:.1f}%**\n")
+
+    # 4. Speaker Recognition Spot-Check
+    spk_rep = report.get("speaker_evaluation")
+    if spk_rep and "models" in spk_rep:
+        lines.append("## 🎙️ Speaker Embedding Models (Stratified Random Spot-Check)\n")
+        lines.append(f"> **Optimal Speaker Model**: `{spk_rep.get('winner')}`\n")
+        lines.append("| Model | Dim | Top-1 Accuracy | Known Recall | Unknown Rejection | FAR | FRR | Discrim Gap | Latency |")
+        lines.append("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
+        for m in spk_rep["models"]:
+            bc = m["best_config"]
+            lines.append(
+                f"| `{m['model']}` | {m['dim']} | **{bc['accuracy']*100:.1f}%** | "
+                f"{bc['known_recall']*100:.1f}% | {bc['unknown_rejection']*100:.1f}% | "
+                f"{bc['far']*100:.1f}% | {bc['frr']*100:.1f}% | "
+                f"+{m['discrimination_gap']:.4f} | {m['latency_ms']:.1f}ms |"
+            )
+
+    # 5. Environment Config Snippet
+    if report.get("recommended_env"):
+        lines.append("\n## ⚙️ Recommended `.env` Snippet\n")
+        lines.append("```ini")
+        lines.append(report["recommended_env"])
+        lines.append("```\n")
 
     return "\n".join(lines)
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Benchmark multiple VAD models against ground truth dataset")
-    parser.add_argument("--labels", type=Path, help="Path to labels.json")
+    parser = argparse.ArgumentParser(description="Multi-Day VAD & Speaker Recognition Comprehensive Benchmark")
+    parser.add_argument("--labels", type=Path, help="Path to labels.json or dataset.json")
     parser.add_argument("--slices-dir", type=Path, help="Path to slices directory containing labels.json")
     parser.add_argument("--all-slices", action="store_true", help="Evaluate all slices, including unverified ones")
     parser.add_argument("--wav", type=Path, help="Quick test: single WAV file")
-    parser.add_argument("--intervals", type=str, default="", help="Quick test: speech intervals for --wav (e.g. '0.5-3.2; 4.0-7.5')")
+    parser.add_argument("--intervals", type=str, default="", help="Quick test: speech intervals for --wav")
     parser.add_argument("--scene", type=str, default="谈话", help="Quick test: scene name for --wav")
-    parser.add_argument("--models", type=str, default="", help="Comma-separated models to evaluate (default: all available)")
-    parser.add_argument("--sweep", action="store_true", help="Run hyperparameter grid sweep across thresholds and padding")
+    parser.add_argument("--models", type=str, default="", help="Comma-separated VAD models to evaluate")
+    parser.add_argument("--sweep", action="store_true", help="Run full hyperparameter grid sweep")
     parser.add_argument("--output", "-o", type=Path, help="Output path for Markdown report (e.g. report.md)")
     parser.add_argument("--json", type=Path, help="Output path for JSON report (e.g. report.json)")
     args = parser.parse_args()
 
-    # Determine slice list
-    slices = []
+    records = []
     base_dir = Path(".")
+
     if args.wav:
         if not args.wav.is_file():
             raise FileNotFoundError(f"WAV file not found: {args.wav}")
         samples = read_wav_16k(args.wav)
         dur = len(samples) / 16000.0
-        slices.append({
+        records.append({
             "id": args.wav.stem,
             "file": str(args.wav),
+            "samples": samples,
             "duration_s": round(dur, 2),
             "scene": args.scene,
+            "has_speech": bool(args.intervals),
+            "should_detect": bool(args.intervals),
             "speech_intervals": args.intervals,
             "verified": True,
         })
@@ -267,27 +461,22 @@ def main() -> None:
         if not labels_file and args.slices_dir:
             labels_file = args.slices_dir / "labels.json"
         if not labels_file or not labels_file.is_file():
-            raise FileNotFoundError(f"labels.json not found. Pass --labels or --slices-dir.")
+            raise FileNotFoundError("labels.json not found. Pass --labels or --slices-dir.")
         base_dir = labels_file.parent
         data = json.loads(labels_file.read_text())
-        all_s = data.get("slices", [])
+        all_s = data.get("slices") or data.get("chunks") or []
         if args.all_slices:
-            slices = all_s
+            records = all_s
         else:
-            slices = [s for s in all_s if s.get("verified")]
-            if not slices:
-                print("Warning: No verified slices found. Falling back to all slices (--all-slices).")
-                slices = all_s
+            records = [s for s in all_s if s.get("verified") or s.get("labeled")]
+            if not records:
+                records = all_s
 
-    if not slices:
-        raise ValueError("No slices available to evaluate.")
+    if not records:
+        raise ValueError("No records available to evaluate.")
 
-    # Determine models
-    if args.models:
-        model_names = [m.strip() for m in args.models.split(",") if m.strip()]
-    else:
-        avail = list_available_vads()
-        model_names = [v["id"] for v in avail if v["ready"] and v["id"] not in ("passthrough", "energy_demo")]
+    # Parse models
+    vad_models = [m.strip() for m in args.models.split(",") if m.strip()] if args.models else None
 
     # Determine configs
     configs = []
@@ -302,15 +491,15 @@ def main() -> None:
         configs.append(("conservative", VadConfig(threshold=0.35, pad_ms=96, retain_uncertain=True)))
         configs.append(("aggressive", VadConfig(threshold=0.65, pad_ms=32, retain_uncertain=False)))
 
-    print(f"Starting benchmark on {len(slices)} slices with {len(model_names)} models ({len(configs)} configs each)...")
-    report = run_benchmark_on_dataset(slices, model_names, configs, base_dir)
+    print(f"Running comprehensive evaluation on {len(records)} chunks...")
+    report = run_comprehensive_evaluation(records, vad_models=vad_models, configs=configs, base_dir=base_dir)
 
-    md_output = format_markdown_report(report)
-    print("\n" + md_output)
+    md_text = format_comprehensive_markdown(report)
+    print("\n" + md_text)
 
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(md_output, encoding="utf-8")
+        args.output.write_text(md_text, encoding="utf-8")
         print(f"Markdown report written to: {args.output}")
 
     if args.json:

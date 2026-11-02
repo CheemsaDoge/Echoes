@@ -81,7 +81,7 @@ def compute_acoustic_features(samples: np.ndarray) -> dict:
     # Frame-wise energy activity (> -42 dBFS)
     frame_len = 512
     active_count = 0
-    total_frames = max(1, len(samples) // frame_len)
+    total_frames = max(1, math.ceil(len(samples) / frame_len))
     for i in range(0, len(samples), frame_len):
         chunk = f[i:i+frame_len]
         c_rms = np.sqrt(np.mean(chunk * chunk))

@@ -167,26 +167,41 @@ class WebRtcScorer:
         if mode not in (0, 1, 2, 3):
             raise ValueError(f"Invalid WebRTC VAD mode: {mode}, expected 0, 1, 2, or 3")
         self.mode = mode
-        self.vad = webrtcvad.Vad(mode)
         self.model_id = f"webrtc-mode-{mode}"
 
     def probabilities(self, samples: np.ndarray) -> np.ndarray:
         if len(samples) == 0:
             return np.zeros(0, dtype=np.float32)
+        import webrtcvad
+        # Create fresh Vad instance per call to eliminate state leakage across independent recordings
+        vad = webrtcvad.Vad(self.mode)
         pcm = samples.astype(np.int16)
-        scores = []
+        n_samples = len(pcm)
         sub_len = 160  # 10ms subframe at 16kHz
-        for i in range(0, len(pcm), FRAME):
-            frame = pcm[i:i + FRAME]
-            sub_scores = []
-            for j in range(0, len(frame) - sub_len + 1, sub_len):
-                sub = frame[j:j + sub_len].tobytes()
-                sub_scores.append(1.0 if self.vad.is_speech(sub, 16000) else 0.0)
-            if not sub_scores:
-                sub = np.pad(frame, (0, sub_len - len(frame))).tobytes()
-                sub_scores.append(1.0 if self.vad.is_speech(sub, 16000) else 0.0)
-            scores.append(float(np.mean(sub_scores)))
-        return np.asarray(scores, dtype=np.float32)
+
+        # Process the entire stream contiguously across 10ms subframes
+        n_subframes = math.ceil(n_samples / sub_len)
+        sub_flags = np.zeros(n_subframes, dtype=np.float32)
+        for idx in range(n_subframes):
+            start = idx * sub_len
+            end = min(n_samples, start + sub_len)
+            chunk = pcm[start:end]
+            if len(chunk) < sub_len:
+                chunk = np.pad(chunk, (0, sub_len - len(chunk)))
+            sub_flags[idx] = 1.0 if vad.is_speech(chunk.tobytes(), 16000) else 0.0
+
+        # Map 10ms subframes back to the 512-sample (32ms) output frame grid
+        n_frames = math.ceil(n_samples / FRAME)
+        scores = np.zeros(n_frames, dtype=np.float32)
+        for i in range(n_frames):
+            frame_start = i * FRAME
+            frame_end = min(n_samples, frame_start + FRAME)
+            sub_start = frame_start // sub_len
+            sub_end = math.ceil(frame_end / sub_len)
+            sub_slice = sub_flags[sub_start:sub_end]
+            scores[i] = float(np.mean(sub_slice)) if len(sub_slice) > 0 else 0.0
+
+        return scores
 
 def _find_model_path(candidates: list[str]) -> str:
     for c in candidates:

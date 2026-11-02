@@ -68,6 +68,7 @@ def run_benchmark_on_dataset(
 ) -> dict:
     # Preload audio into memory
     audio_cache = {}
+    total_audio_sec = 0.0
     for item in slices:
         wav_path = base_dir / item["file"]
         if not wav_path.is_file():
@@ -76,7 +77,9 @@ def run_benchmark_on_dataset(
                 wav_path = Path(item["file"])
             else:
                 raise FileNotFoundError(f"Slice audio file not found: {wav_path}")
-        audio_cache[item["id"]] = read_wav_16k(wav_path)
+        audio_data = read_wav_16k(wav_path)
+        audio_cache[item["id"]] = audio_data
+        total_audio_sec += len(audio_data) / 16000.0
 
     results = []
 
@@ -90,12 +93,10 @@ def run_benchmark_on_dataset(
         # Compute probabilities and benchmark inference latency
         model_scores = {}
         total_inf_time = 0.0
-        total_audio_sec = 0.0
 
         for item in slices:
             samples = audio_cache[item["id"]]
             audio_sec = len(samples) / 16000.0
-            total_audio_sec += audio_sec
 
             t0 = time.perf_counter()
             probs = scorer.probabilities(samples)

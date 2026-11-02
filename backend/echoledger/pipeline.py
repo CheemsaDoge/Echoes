@@ -135,8 +135,13 @@ class Pipeline:
         if self.settings.asr_provider == "gemini" and not self.settings.gemini_key:
             raise ProviderBlocked("GEMINI_KEY_MISSING")
         if self.settings.asr_provider == "vertexai":
-            if not self.settings.vertex_api_key and not self.settings.vertex_project and not self.settings.vertex_credentials and not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
-                raise ProviderBlocked("VERTEX_PROJECT_MISSING")
+            if not self.settings.vertex_api_key and not self.settings.vertex_endpoint:
+                if hasattr(self.transcriber, "discover_project"):
+                    proj = getattr(self.transcriber, "project", "") or self.transcriber.discover_project()
+                    if not proj:
+                        raise ProviderBlocked("VERTEX_PROJECT_MISSING")
+                elif not self.settings.vertex_project and not self.settings.vertex_credentials and not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
+                    raise ProviderBlocked("VERTEX_PROJECT_MISSING")
         day = dt.datetime.now(dt.timezone.utc).date().isoformat()
         with self.db.connect(immediate=True) as c:
             if not c.execute("SELECT 1 FROM batches WHERE id=? AND lease_token=?", (batch["id"], batch["lease_token"])).fetchone():

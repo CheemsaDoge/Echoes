@@ -200,3 +200,105 @@ def test_vertexai_http_failure_classification(code, retry):
     assert caught.value.retryable is retry
     assert "vertex error" not in str(caught.value)
 
+def test_vertexai_prompt_feedback_blocked():
+    transcriber = VertexAiTranscriber(
+        api_key="my-key",
+        endpoint="https://test.endpoint/generateContent",
+        transport=httpx.MockTransport(lambda req: httpx.Response(200, json={"promptFeedback": {"blockReason": "SAFETY"}}))
+    )
+    with pytest.raises(ProviderBlocked, match="VERTEX_PROMPT_BLOCKED_SAFETY"):
+        transcriber.transcribe(np.zeros(16000, dtype=np.int16))
+
+@pytest.mark.parametrize("reason", ["SAFETY", "BLOCKLIST", "PROHIBITED_CONTENT"])
+def test_vertexai_finish_reason_blocked(reason):
+    transcriber = VertexAiTranscriber(
+        api_key="my-key",
+        endpoint="https://test.endpoint/generateContent",
+        transport=httpx.MockTransport(lambda req: httpx.Response(200, json={
+            "candidates": [{"finishReason": reason, "content": {"parts": [{"text": ""}]}}]
+        }))
+    )
+    with pytest.raises(ProviderBlocked, match=f"VERTEX_FINISH_BLOCKED_{reason}"):
+        transcriber.transcribe(np.zeros(16000, dtype=np.int16))
+
+def test_vertexai_valid_silence_empty_segments():
+    transcriber = VertexAiTranscriber(
+        api_key="my-key",
+        endpoint="https://test.endpoint/generateContent",
+        transport=httpx.MockTransport(lambda req: httpx.Response(200, json={
+            "candidates": [{"finishReason": "STOP", "content": {"parts": [{"text": json.dumps({"segments": []})}]}}],
+            "usageMetadata": {"totalTokenCount": 20}
+        }))
+    )
+    result = transcriber.transcribe(np.zeros(16000, dtype=np.int16))
+    assert len(result.segments) == 0
+    assert result.usage.get("totalTokenCount") == 20
+
+def test_vertexai_empty_response_rejected():
+    transcriber_no_candidates = VertexAiTranscriber(
+        api_key="my-key",
+        endpoint="https://test.endpoint/generateContent",
+        transport=httpx.MockTransport(lambda req: httpx.Response(200, json={"candidates": []}))
+    )
+    with pytest.raises(ProviderError, match="ASR_EMPTY_CANDIDATES"):
+        transcriber_no_candidates.transcribe(np.zeros(16000, dtype=np.int16))
+
+    transcriber_empty_parts = VertexAiTranscriber(
+        api_key="my-key",
+        endpoint="https://test.endpoint/generateContent",
+        transport=httpx.MockTransport(lambda req: httpx.Response(200, json={
+            "candidates": [{"finishReason": "STOP", "content": {"parts": [{"text": "   "}]}}]
+        }))
+    )
+    with pytest.raises(ProviderError, match="ASR_EMPTY_CONTENT"):
+        transcriber_empty_parts.transcribe(np.zeros(16000, dtype=np.int16))
+
+def test_vertexai_adc_project_discovery(monkeypatch):
+    class MockCreds:
+        valid = True
+        token = "mock-adc-token"
+        project_id = "adc-proj-from-creds"
+    monkeypatch.setattr("google.auth.default", lambda scopes=None: (MockCreds(), "discovered-adc-project"))
+    t = VertexAiTranscriber(project="", location="asia-east1")
+    endpoint = t.resolve_endpoint()
+    assert "discovered-adc-project" in endpoint
+    assert t.project == "discovered-adc-project"
+
+def test_vertexai_credential_file_loader(tmp_path, monkeypatch):
+    cred_file = tmp_path / "credentials.json"
+    cred_file.write_text('{"type": "authorized_user"}')
+    class MockCreds:
+        valid = True
+        token = "mock-file-token"
+        project_id = "file-project-id"
+    monkeypatch.setattr("google.auth.load_credentials_from_file", lambda path, scopes=None: (MockCreds(), "file-project-id"))
+    t = VertexAiTranscriber(credentials_path=str(cred_file))
+    t.discover_project()
+    assert t.project == "file-project-id"
+
+def test_vertexai_auth_transport_error_retryable():
+    import google.auth.exceptions
+    class FailingCreds:
+        valid = False
+        token = None
+        def refresh(self, request):
+            raise google.auth.exceptions.TransportError("auth network timed out")
+    t = VertexAiTranscriber(project="p1")
+    t._credentials = FailingCreds()
+    with pytest.raises(ProviderError) as exc:
+        t.get_auth_headers()
+    assert exc.value.retryable is True
+    assert "ASR_AUTH_NETWORK_ERROR" in str(exc.value)
+
+def test_vertexai_auth_invalid_credentials_not_retryable():
+    import google.auth.exceptions
+    class BadCreds:
+        valid = False
+        token = None
+        def refresh(self, request):
+            raise google.auth.exceptions.RefreshError("invalid_grant: Bad client")
+    t = VertexAiTranscriber(project="p1")
+    t._credentials = BadCreds()
+    with pytest.raises(ProviderBlocked, match="VERTEX_CREDENTIALS_MISSING"):
+        t.get_auth_headers()
+

@@ -197,12 +197,81 @@ class VertexAiTranscriber:
         self.api_key = api_key
         self.endpoint_override = endpoint
         self.transport = transport
+        self._credentials = None
+
+    @staticmethod
+    def _is_transport_error(exc: Exception) -> bool:
+        try:
+            import google.auth.exceptions
+            types = (google.auth.exceptions.TransportError, httpx.HTTPError, TimeoutError, ConnectionError)
+        except ImportError:
+            types = (httpx.HTTPError, TimeoutError, ConnectionError)
+        if isinstance(exc, types):
+            return True
+        if getattr(exc, "__cause__", None) and isinstance(exc.__cause__, types):
+            return True
+        if any(isinstance(arg, types) for arg in getattr(exc, "args", [])):
+            return True
+        return False
+
+    def _load_credentials(self):
+        if self._credentials is not None:
+            return self._credentials
+
+        creds = None
+        detected_proj = None
+
+        if self.credentials_path:
+            p = Path(self.credentials_path)
+            if not p.is_file():
+                raise ProviderBlocked("VERTEX_CREDENTIALS_MISSING")
+            try:
+                import google.auth
+                creds, detected_proj = google.auth.load_credentials_from_file(
+                    str(p), scopes=["https://www.googleapis.com/auth/cloud-platform"]
+                )
+            except ProviderBlocked:
+                raise
+            except Exception as exc:
+                if self._is_transport_error(exc):
+                    raise ProviderError("ASR_AUTH_NETWORK_ERROR", retryable=True) from exc
+                raise ProviderBlocked("VERTEX_CREDENTIALS_MISSING") from exc
+        else:
+            try:
+                import google.auth
+                creds, detected_proj = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+            except Exception as exc:
+                if self._is_transport_error(exc):
+                    raise ProviderError("ASR_AUTH_NETWORK_ERROR", retryable=True) from exc
+                raise ProviderBlocked("VERTEX_CREDENTIALS_MISSING") from exc
+
+        if not creds:
+            raise ProviderBlocked("VERTEX_CREDENTIALS_MISSING")
+
+        if not self.project:
+            self.project = detected_proj or getattr(creds, "project_id", "") or getattr(creds, "quota_project_id", "")
+
+        self._credentials = creds
+        return creds
+
+    def discover_project(self) -> str:
+        if self.project:
+            return self.project
+        if self.api_key:
+            return ""
+        try:
+            self._load_credentials()
+        except ProviderBlocked:
+            pass
+        return self.project
 
     def resolve_endpoint(self) -> str:
         if self.endpoint_override:
             return self.endpoint_override
         if self.api_key and not self.project:
             return f"https://aiplatform.googleapis.com/v1/publishers/google/models/{self.model}:generateContent"
+        if not self.project:
+            self.discover_project()
         if not self.project:
             raise ProviderBlocked("VERTEX_PROJECT_MISSING")
         if self.location == "global":
@@ -213,29 +282,7 @@ class VertexAiTranscriber:
         if self.api_key:
             return {"x-goog-api-key": self.api_key}
 
-        creds = None
-        if self.credentials_path:
-            p = Path(self.credentials_path)
-            if not p.is_file():
-                raise ProviderBlocked("VERTEX_CREDENTIALS_MISSING")
-            try:
-                from google.oauth2 import service_account
-                creds = service_account.Credentials.from_service_account_file(
-                    str(p), scopes=["https://www.googleapis.com/auth/cloud-platform"]
-                )
-            except Exception as exc:
-                raise ProviderBlocked("VERTEX_CREDENTIALS_MISSING") from exc
-        else:
-            try:
-                import google.auth
-                creds, detected_proj = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
-                if not self.project and detected_proj:
-                    self.project = detected_proj
-            except Exception as exc:
-                raise ProviderBlocked("VERTEX_CREDENTIALS_MISSING") from exc
-
-        if not creds:
-            raise ProviderBlocked("VERTEX_CREDENTIALS_MISSING")
+        creds = self._load_credentials()
 
         try:
             if not creds.valid:
@@ -246,7 +293,11 @@ class VertexAiTranscriber:
             return {"Authorization": f"Bearer {creds.token}"}
         except ProviderBlocked:
             raise
+        except ProviderError:
+            raise
         except Exception as exc:
+            if self._is_transport_error(exc):
+                raise ProviderError("ASR_AUTH_NETWORK_ERROR", retryable=True) from exc
             raise ProviderBlocked("VERTEX_CREDENTIALS_MISSING") from exc
 
     def transcribe(self, samples: np.ndarray, language: str = "zh") -> Transcript:
@@ -310,7 +361,7 @@ class VertexAiTranscriber:
             with httpx.Client(timeout=httpx.Timeout(120, connect=20), transport=self.transport) as client:
                 headers = self.get_auth_headers(client)
                 response = client.post(endpoint, headers=headers, json=body)
-        except ProviderBlocked:
+        except (ProviderBlocked, ProviderError):
             raise
         except httpx.HTTPError as exc:
             raise ProviderError("ASR_NETWORK_ERROR") from exc
@@ -320,13 +371,29 @@ class VertexAiTranscriber:
 
         try:
             data = response.json()
-            candidates = data.get("candidates", [])
-            if not candidates:
-                return Transcript([], f"vertexai:{self.model}", False, data.get("usageMetadata", {}))
-            parts = candidates[0].get("content", {}).get("parts", [])
-            raw_text = "".join(p.get("text", "") for p in parts).strip()
-            if not raw_text:
-                return Transcript([], f"vertexai:{self.model}", False, data.get("usageMetadata", {}))
+        except Exception as exc:
+            raise ProviderError("ASR_INVALID_RESPONSE", False) from exc
+
+        prompt_feedback = data.get("promptFeedback") or {}
+        block_reason = prompt_feedback.get("blockReason")
+        if block_reason:
+            raise ProviderBlocked(f"VERTEX_PROMPT_BLOCKED_{block_reason}")
+
+        candidates = data.get("candidates", [])
+        if not candidates:
+            raise ProviderError("ASR_EMPTY_CANDIDATES", False)
+
+        candidate = candidates[0]
+        finish_reason = candidate.get("finishReason")
+        if finish_reason and finish_reason not in {"STOP", "MAX_TOKENS", "FINISH_REASON_UNSPECIFIED"}:
+            raise ProviderBlocked(f"VERTEX_FINISH_BLOCKED_{finish_reason}")
+
+        parts = candidate.get("content", {}).get("parts", [])
+        raw_text = "".join(p.get("text", "") for p in parts).strip()
+        if not raw_text:
+            raise ProviderError("ASR_EMPTY_CONTENT", False)
+
+        try:
             result = json.loads(raw_text)
             raw_segments = result.get("segments", [])
             segments = []

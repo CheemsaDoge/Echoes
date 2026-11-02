@@ -1,6 +1,6 @@
 from __future__ import annotations
 import datetime as dt
-import hashlib, json, shutil, time, uuid
+import hashlib, json, os, shutil, time, uuid
 from pathlib import Path
 import numpy as np
 from .audio import SAMPLE_RATE, read_wav, pack_audio, restore_interval, atomic_write, wav_bytes
@@ -8,7 +8,7 @@ from .config import Settings
 from .db import Database, emit, now_ms, uid
 from .models import VadConfig, AsrSegment
 from .providers import (Transcriber, Transcript, DisabledTranscriber, MockTranscriber,
-                        GeminiTranscriber, ProviderBlocked, ProviderError)
+                        GeminiTranscriber, VertexAiTranscriber, ProviderBlocked, ProviderError)
 from .vad import make_scorer, speech_intervals
 
 
@@ -84,6 +84,14 @@ class Pipeline:
         self.transcriber = transcriber or {
             "disabled": lambda: DisabledTranscriber(), "mock": lambda: MockTranscriber(),
             "gemini": lambda: GeminiTranscriber(settings.gemini_key, settings.gemini_model, settings.gemini_mode),
+            "vertexai": lambda: VertexAiTranscriber(
+                project=settings.vertex_project,
+                location=settings.vertex_location,
+                model=settings.vertex_model,
+                credentials_path=settings.vertex_credentials,
+                api_key=settings.vertex_api_key,
+                endpoint=settings.vertex_endpoint,
+            ),
         }[settings.asr_provider]()
 
     @property
@@ -126,13 +134,14 @@ class Pipeline:
             raise ProviderBlocked("ASR_NOT_CONFIGURED")
         if self.settings.asr_provider == "gemini" and not self.settings.gemini_key:
             raise ProviderBlocked("GEMINI_KEY_MISSING")
+        if self.settings.asr_provider == "vertexai":
+            if not self.settings.vertex_api_key and not self.settings.vertex_project and not self.settings.vertex_credentials and not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
+                raise ProviderBlocked("VERTEX_PROJECT_MISSING")
         day = dt.datetime.now(dt.timezone.utc).date().isoformat()
         with self.db.connect(immediate=True) as c:
             if not c.execute("SELECT 1 FROM batches WHERE id=? AND lease_token=?", (batch["id"], batch["lease_token"])).fetchone():
                 raise ProviderBlocked("BATCH_CANCELLED")
-            used = c.execute("SELECT COALESCE(SUM(audio_seconds),0) FROM usage WHERE day=?", (day,)).fetchone()[0]
-            if used + audio_seconds > self.settings.daily_audio_seconds:
-                raise ProviderBlocked("DAILY_AUDIO_BUDGET_REACHED")
+            # Log usage for statistics; daily audio budget limit is removed (unlimited)
             c.execute("INSERT INTO usage VALUES(?,?,?,?,?,?)",
                       (uid(), batch["id"], day, audio_seconds, self.settings.asr_provider, now_ms()))
 
@@ -168,11 +177,18 @@ class Pipeline:
         probs = self.scorer.probabilities(samples)
         intervals = speech_intervals(probs, len(samples), config)
         packed, mapping = pack_audio(samples, intervals, sources)
+        asr_meta = {"asr": self.settings.asr_provider}
+        if self.settings.asr_provider == "vertexai":
+            asr_meta["vertex_model"] = self.settings.vertex_model
+            asr_meta["vertex_location"] = self.settings.vertex_location
+        else:
+            asr_meta["model"] = self.settings.gemini_model
+            asr_meta["mode"] = self.settings.gemini_mode
+
         fingerprint = hashlib.sha256(json.dumps({
             "pipeline_version": 1, "chunks": [(r["sha256"], skip) for r, skip in source_chunks],
             "profile": profile["config"], "vad": self.scorer.model_id,
-            "asr": self.settings.asr_provider, "model": self.settings.gemini_model,
-            "mode": self.settings.gemini_mode,
+            **asr_meta,
         }, sort_keys=True).encode()).hexdigest()[:20]
         derived = self.settings.data_dir / "derived" / session["id"] / batch["id"] / fingerprint
         metrics = {"raw_samples": sum(c["sample_count"] for c in chunks),

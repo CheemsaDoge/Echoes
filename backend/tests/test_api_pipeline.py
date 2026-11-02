@@ -191,11 +191,17 @@ def test_persistence(client,app):
     assert reopened.one("SELECT COUNT(*) AS n FROM events")["n"]==1
     assert len(reopened.all("SELECT * FROM profiles"))==1
 
-def test_budget_blocks_call(client,app):
-    from dataclasses import replace
-    app.state.pipeline.settings=replace(app.state.settings,daily_audio_seconds=0)
-    assert finish(client,app)==[]
-    assert client.get("/v1/batches").json()[0]["error"]=="DAILY_AUDIO_BUDGET_REACHED"
+def test_unlimited_budget_accumulates_usage(client,app):
+    events = finish(client, app, sid="session-00000001")
+    assert len(events) == 1
+    events2 = finish(client, app, sid="session-00000002")
+    assert len(events2) == 2
+    usage = client.get("/v1/usage").json()
+    assert usage["daily_limit_seconds"] is None
+    assert len(usage["days"]) >= 1
+    assert usage["days"][0]["reserved_audio_seconds"] > 0
+    batches = client.get("/v1/batches").json()
+    assert all(b.get("error") != "DAILY_AUDIO_BUDGET_REACHED" for b in batches)
 
 
 @pytest.mark.parametrize("field,value", [("api_token", "REPLACE_WITH_RANDOM_API_TOKEN"), ("mcp_token", "REPLACE_WITH_DISTINCT_RANDOM_MCP_TOKEN")])

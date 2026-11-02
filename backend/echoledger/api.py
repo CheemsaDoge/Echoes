@@ -72,7 +72,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         counts = db.all("SELECT state,COUNT(*) AS count FROM batches GROUP BY state")
         latest = db.one("SELECT COALESCE(MAX(cursor),0) AS cursor FROM changes")
         return {"version": "0.1.0", "asr_provider": settings.asr_provider,
-                "asr_configured": settings.asr_provider == "mock" or (settings.asr_provider == "gemini" and bool(settings.gemini_key)),
+                "asr_configured": settings.asr_provider == "mock" or (settings.asr_provider == "gemini" and bool(settings.gemini_key)) or (settings.asr_provider == "vertexai" and bool(settings.vertex_project or settings.vertex_api_key or settings.vertex_credentials or os.getenv("GOOGLE_APPLICATION_CREDENTIALS"))),
                 "vad_provider": settings.vad_provider, "voice_embedding_provider": "not_configured",
                 "speaker_identity": "manual-or-external-embedding", "memory_mode": "evidence-excerpts-with-human-confirmation",
                 "mcp_enabled": bool(settings.mcp_token), "batch_counts": counts, "cursor": latest["cursor"],
@@ -474,7 +474,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @router.get("/usage")
     def usage():
         return {"days": db.all("SELECT day,provider,SUM(audio_seconds) AS reserved_audio_seconds,COUNT(*) AS attempts FROM usage GROUP BY day,provider ORDER BY day DESC LIMIT 60"),
-                "daily_limit_seconds": settings.daily_audio_seconds, "basis": "UTC request-day, conservative pre-request reservation; not a billing invoice"}
+                "daily_limit_seconds": None, "basis": "UTC request-day, conservative pre-request reservation; not a billing invoice"}
 
     app.include_router(router)
 

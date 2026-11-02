@@ -3,7 +3,7 @@ import httpx
 import numpy as np
 import pytest
 from echoledger.speakers import normalize,match_speaker
-from echoledger.providers import GeminiTranscriber,parse_transcribe,ProviderError,ProviderBlocked
+from echoledger.providers import GeminiTranscriber,VertexAiTranscriber,parse_transcribe,ProviderError,ProviderBlocked
 from conftest import finish,TOKEN,MCP_TOKEN
 
 @pytest.mark.parametrize("vector", [[0]*8,[float("nan")]*8,[1]*3,[float("inf")]*8])
@@ -93,3 +93,110 @@ def test_mcp_notification(client):
 def test_mcp_malformed(client):
     r=client.post("/mcp",content=b"{",headers={"Authorization":"Bearer "+MCP_TOKEN})
     assert r.status_code==400 and r.json()["error"]["code"]==-32700
+
+def vertex_example_response(text="Hello from Vertex", start_ms=100, end_ms=800):
+    return {
+        "candidates": [
+            {
+                "content": {
+                    "parts": [
+                        {
+                            "text": json.dumps({
+                                "segments": [
+                                    {
+                                        "start_ms": start_ms,
+                                        "end_ms": end_ms,
+                                        "text": text,
+                                        "speaker_label": "spk_0"
+                                    }
+                                ]
+                            })
+                        }
+                    ]
+                }
+            }
+        ],
+        "usageMetadata": {"promptTokenCount": 50, "candidatesTokenCount": 20, "totalTokenCount": 70}
+    }
+
+def test_vertexai_url_resolution():
+    t_global = VertexAiTranscriber(project="p1", location="global", model="gemini-2.5-flash")
+    assert t_global.resolve_endpoint() == "https://aiplatform.googleapis.com/v1/projects/p1/locations/global/publishers/google/models/gemini-2.5-flash:generateContent"
+
+    t_reg = VertexAiTranscriber(project="p1", location="asia-east1", model="gemini-2.5-flash")
+    assert t_reg.resolve_endpoint() == "https://asia-east1-aiplatform.googleapis.com/v1/projects/p1/locations/asia-east1/publishers/google/models/gemini-2.5-flash:generateContent"
+
+    t_express = VertexAiTranscriber(api_key="k1", project="", model="gemini-2.5-flash")
+    assert t_express.resolve_endpoint() == "https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-2.5-flash:generateContent"
+
+    t_override = VertexAiTranscriber(endpoint="https://custom.endpoint/generateContent")
+    assert t_override.resolve_endpoint() == "https://custom.endpoint/generateContent"
+
+    t_missing = VertexAiTranscriber(project="", location="us-central1")
+    with pytest.raises(ProviderBlocked, match="VERTEX_PROJECT_MISSING"):
+        t_missing.resolve_endpoint()
+
+def test_vertexai_api_key_transcribe():
+    def handler(request):
+        assert request.headers["x-goog-api-key"] == "my-api-key"
+        body = json.loads(request.content)
+        assert "contents" in body
+        assert body["generationConfig"]["audioTimestamp"] is True
+        return httpx.Response(200, json=vertex_example_response("Test audio speech"))
+
+    transcriber = VertexAiTranscriber(
+        api_key="my-api-key",
+        endpoint="https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-2.5-flash:generateContent",
+        transport=httpx.MockTransport(handler)
+    )
+    result = transcriber.transcribe(np.zeros(16000, dtype=np.int16))
+    assert len(result.segments) == 1
+    assert result.segments[0].text == "Test audio speech"
+    assert result.segments[0].start_ms == 100
+    assert result.segments[0].end_ms == 800
+    assert result.usage.get("totalTokenCount") == 70
+
+def test_vertexai_bearer_token_transcribe():
+    def handler(request):
+        assert request.headers["authorization"] == "Bearer mock-token-123"
+        return httpx.Response(200, json=vertex_example_response("Authenticated speech"))
+
+    transcriber = VertexAiTranscriber(
+        project="p1",
+        endpoint="https://test.endpoint/generateContent",
+        transport=httpx.MockTransport(handler)
+    )
+    transcriber.get_auth_headers = lambda client=None: {"Authorization": "Bearer mock-token-123"}
+    result = transcriber.transcribe(np.zeros(16000, dtype=np.int16))
+    assert len(result.segments) == 1
+    assert result.segments[0].text == "Authenticated speech"
+
+def test_vertexai_missing_credentials():
+    transcriber = VertexAiTranscriber(project="p1", credentials_path="non/existent/file.json")
+    with pytest.raises(ProviderBlocked, match="VERTEX_CREDENTIALS_MISSING"):
+        transcriber.transcribe(np.zeros(16000, dtype=np.int16))
+
+def test_vertexai_timestamp_out_of_range():
+    def handler(request):
+        return httpx.Response(200, json=vertex_example_response(start_ms=0, end_ms=50000))
+
+    transcriber = VertexAiTranscriber(
+        api_key="my-key",
+        endpoint="https://test.endpoint/generateContent",
+        transport=httpx.MockTransport(handler)
+    )
+    with pytest.raises(ProviderError, match="ASR_TIMESTAMP_OUT_OF_RANGE"):
+        transcriber.transcribe(np.zeros(16000, dtype=np.int16))
+
+@pytest.mark.parametrize("code,retry", [(429, True), (500, True), (401, False), (400, False)])
+def test_vertexai_http_failure_classification(code, retry):
+    transcriber = VertexAiTranscriber(
+        api_key="my-key",
+        endpoint="https://test.endpoint/generateContent",
+        transport=httpx.MockTransport(lambda req: httpx.Response(code, json={"error": "vertex error"}))
+    )
+    with pytest.raises(ProviderError) as caught:
+        transcriber.transcribe(np.zeros(16000, dtype=np.int16))
+    assert caught.value.retryable is retry
+    assert "vertex error" not in str(caught.value)
+

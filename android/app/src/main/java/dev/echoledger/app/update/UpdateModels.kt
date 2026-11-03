@@ -17,15 +17,35 @@ data class SemVer(
         if (minor != other.minor) return minor.compareTo(other.minor)
         if (patch != other.patch) return patch.compareTo(other.patch)
 
-        // According to SemVer 2.0.0:
-        // A normal version has higher precedence than a pre-release version:
-        // 1.0.0 > 1.0.0-alpha
-        return when {
-            preRelease == null && other.preRelease == null -> 0
-            preRelease == null && other.preRelease != null -> 1
-            preRelease != null && other.preRelease == null -> -1
-            else -> (preRelease ?: "").compareTo(other.preRelease ?: "")
+        return comparePreRelease(preRelease, other.preRelease)
+    }
+
+    private fun comparePreRelease(pre1: String?, pre2: String?): Int {
+        if (pre1 == null && pre2 == null) return 0
+        if (pre1 == null && pre2 != null) return 1
+        if (pre1 != null && pre2 == null) return -1
+
+        val parts1 = pre1!!.split('.')
+        val parts2 = pre2!!.split('.')
+        val minSize = minOf(parts1.size, parts2.size)
+
+        for (i in 0 until minSize) {
+            val p1 = parts1[i]
+            val p2 = parts2[i]
+            if (p1 == p2) continue
+
+            val num1 = p1.toIntOrNull()
+            val num2 = p2.toIntOrNull()
+
+            return when {
+                num1 != null && num2 != null -> num1.compareTo(num2)
+                num1 != null && num2 == null -> -1
+                num1 == null && num2 != null -> 1
+                else -> p1.compareTo(p2)
+            }
         }
+
+        return parts1.size.compareTo(parts2.size)
     }
 
     override fun toString(): String {

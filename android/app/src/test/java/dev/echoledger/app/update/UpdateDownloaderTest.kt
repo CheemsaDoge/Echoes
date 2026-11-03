@@ -12,6 +12,7 @@ import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
+import okio.buffer
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
@@ -246,5 +247,63 @@ class UpdateDownloaderTest {
         assertEquals(100, progressList.last().percent)
         val destFile = downloader.getApkFile("v0.5.0")
         assertTrue(destFile.exists())
+    }
+
+    @Test
+    fun testCancellationAbortsDownload() = runTest {
+        val downloadDir = tempFolder.newFolder("updates")
+        val client = createMockClient { req ->
+            mockStreamResponse(req, ByteArray(10000))
+        }
+
+        val downloader = UpdateDownloader(downloadDir = downloadDir, client = client)
+        val apkAsset = ApkAsset("EchoLedger.apk", 10000L, "https://example.com/huge.apk")
+
+        val job = launch {
+            downloader.download(apkAsset, "0.9.0").collect()
+        }
+        job.cancelAndJoin()
+
+        assertFalse("Final destination file must never be published upon cancellation", downloader.isApkDownloaded("0.9.0"))
+    }
+
+    @Test
+    fun testInterruptedDownloadDoesNotPublishPartialFile() = runTest {
+        val downloadDir = tempFolder.newFolder("updates")
+        val client = createMockClient { req ->
+            val partialBytes = ByteArray(1024)
+            Response.Builder()
+                .request(req)
+                .protocol(Protocol.HTTP_1_1)
+                .code(200)
+                .message("OK")
+                .body(object : okhttp3.ResponseBody() {
+                    override fun contentType() = "application/vnd.android.package-archive".toMediaType()
+                    override fun contentLength() = 100_000L
+                    override fun source(): okio.BufferedSource {
+                        val buffer = okio.Buffer().write(partialBytes)
+                        return object : okio.ForwardingSource(buffer) {
+                            override fun read(sink: okio.Buffer, byteCount: Long): Long {
+                                val r = super.read(sink, byteCount)
+                                if (r == -1L) throw IOException("Network connection dropped abruptly")
+                                return r
+                            }
+                        }.buffer()
+                    }
+                })
+                .build()
+        }
+
+        val downloader = UpdateDownloader(downloadDir = downloadDir, client = client)
+        val apkAsset = ApkAsset("EchoLedger.apk", 100_000L, "https://example.com/drop.apk")
+
+        try {
+            downloader.download(apkAsset, "0.9.1").collect()
+            fail("Must throw IOException")
+        } catch (_: IOException) {}
+
+        val destFile = downloader.getApkFile("0.9.1")
+        assertFalse("Interrupted download must NOT leave a published destination file", destFile.exists())
+        assertFalse("isApkDownloaded must return false", downloader.isApkDownloaded("0.9.1"))
     }
 }

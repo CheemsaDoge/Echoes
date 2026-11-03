@@ -194,21 +194,58 @@ class UpdateChecker(
         val hex64Strict = Regex("""(?i)(?:sha[-_]?256|checksum)[\s:=]+([a-f0-9]{64})""")
         val hex64Any = Regex("""\b([a-fA-F0-9]{64})\b""")
 
-        // 1. Try companion .sha256 asset first
+        // 1. Try companion checksum asset matching selected APK
         if (assetsArray != null) {
+            // First priority: exact companion asset (e.g. app-release.apk.sha256 or app-release.sha256)
             for (i in 0 until assetsArray.length()) {
                 val asset = assetsArray.getJSONObject(i)
                 val name = asset.optString("name", "")
-                val isShaAsset = name.equals("$apkAssetName.sha256", ignoreCase = true) ||
-                        name.endsWith(".sha256", ignoreCase = true) ||
-                        name.equals("sha256sums.txt", ignoreCase = true)
+                val isExactCompanion = name.equals("$apkAssetName.sha256", ignoreCase = true) ||
+                        name.equals("${apkAssetName.removeSuffix(".apk")}.sha256", ignoreCase = true)
 
-                if (isShaAsset) {
+                if (isExactCompanion) {
                     val shaUrl = asset.optString("browser_download_url")
                     if (shaUrl.isNotEmpty()) {
-                        val downloadedSha = tryFetchCompanionSha(shaUrl)
+                        val downloadedSha = tryFetchCompanionSha(shaUrl, apkAssetName)
                         if (downloadedSha != null) {
                             return downloadedSha
+                        }
+                    }
+                }
+            }
+
+            // Second priority: collective checksum files (e.g. sha256sums.txt, checksums.txt)
+            for (i in 0 until assetsArray.length()) {
+                val asset = assetsArray.getJSONObject(i)
+                val name = asset.optString("name", "")
+                if (name.equals("sha256sums.txt", ignoreCase = true) ||
+                    name.equals("checksums.txt", ignoreCase = true)
+                ) {
+                    val shaUrl = asset.optString("browser_download_url")
+                    if (shaUrl.isNotEmpty()) {
+                        val downloadedSha = tryFetchCompanionSha(shaUrl, apkAssetName)
+                        if (downloadedSha != null) {
+                            return downloadedSha
+                        }
+                    }
+                }
+            }
+
+            // Third priority: only if there is a single APK in the release, accept any .sha256 asset
+            val apkCount = (0 until assetsArray.length()).count {
+                assetsArray.getJSONObject(it).optString("name").endsWith(".apk", ignoreCase = true)
+            }
+            if (apkCount <= 1) {
+                for (i in 0 until assetsArray.length()) {
+                    val asset = assetsArray.getJSONObject(i)
+                    val name = asset.optString("name", "")
+                    if (name.endsWith(".sha256", ignoreCase = true)) {
+                        val shaUrl = asset.optString("browser_download_url")
+                        if (shaUrl.isNotEmpty()) {
+                            val downloadedSha = tryFetchCompanionSha(shaUrl, apkAssetName)
+                            if (downloadedSha != null) {
+                                return downloadedSha
+                            }
                         }
                     }
                 }
@@ -218,6 +255,13 @@ class UpdateChecker(
         // 2. Scan release body markdown for 64-char hex SHA-256
         val body = releaseJson.optString("body", "")
         if (body.isNotEmpty()) {
+            val namedPattern1 = Regex("""\b([a-fA-F0-9]{64})\s+[*]?${Regex.escape(apkAssetName)}\b""")
+            val namedPattern2 = Regex("""${Regex.escape(apkAssetName)}[\s:=]+([a-fA-F0-9]{64})\b""")
+            val namedMatch = namedPattern1.find(body) ?: namedPattern2.find(body)
+            if (namedMatch != null) {
+                return namedMatch.groupValues[1].lowercase()
+            }
+
             val match = hex64Strict.find(body) ?: hex64Any.find(body)
             if (match != null) {
                 return match.groupValues[1].lowercase()
@@ -227,7 +271,7 @@ class UpdateChecker(
         return null
     }
 
-    private fun tryFetchCompanionSha(url: String): String? {
+    private fun tryFetchCompanionSha(url: String, targetApkName: String): String? {
         return try {
             val request = Request.Builder()
                 .url(url)
@@ -236,8 +280,12 @@ class UpdateChecker(
             client.newCall(request).execute().use { resp ->
                 if (resp.isSuccessful) {
                     val text = resp.body?.string().orEmpty()
-                    val match = Regex("""\b([a-fA-F0-9]{64})\b""").find(text)
-                    match?.groupValues?.get(1)?.lowercase()
+                    val specificMatch = Regex("""\b([a-fA-F0-9]{64})\s+[*]?${Regex.escape(targetApkName)}\b""").find(text)
+                    if (specificMatch != null) {
+                        return specificMatch.groupValues[1].lowercase()
+                    }
+                    val genericMatch = Regex("""\b([a-fA-F0-9]{64})\b""").find(text)
+                    genericMatch?.groupValues?.get(1)?.lowercase()
                 } else null
             }
         } catch (_: Exception) {

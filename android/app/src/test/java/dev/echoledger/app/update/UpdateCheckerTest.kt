@@ -265,6 +265,56 @@ class UpdateCheckerTest {
     }
 
     @Test
+    fun testCompanionChecksumMatchesSelectedApkWhenMultipleApksExist() = runTest {
+        val debugHash = "0000000000000000000000000000000000000000000000000000000000000000"
+        val releaseHash = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        val multiApkJson = """
+            {
+              "tag_name": "v0.4.5",
+              "name": "EchoLedger v0.4.5",
+              "body": "",
+              "assets": [
+                {
+                  "name": "app-debug.apk.sha256",
+                  "browser_download_url": "https://example.com/app-debug.apk.sha256"
+                },
+                {
+                  "name": "app-debug.apk",
+                  "size": 18000000,
+                  "browser_download_url": "https://example.com/app-debug.apk"
+                },
+                {
+                  "name": "app-release.apk.sha256",
+                  "browser_download_url": "https://example.com/app-release.apk.sha256"
+                },
+                {
+                  "name": "app-release.apk",
+                  "size": 16000000,
+                  "browser_download_url": "https://example.com/app-release.apk"
+                }
+              ]
+            }
+        """.trimIndent()
+
+        val client = createMockClient { req ->
+            val url = req.url.toString()
+            when {
+                url.endsWith("app-debug.apk.sha256") -> mockResponse(req, 200, "$debugHash  app-debug.apk\n")
+                url.endsWith("app-release.apk.sha256") -> mockResponse(req, 200, "$releaseHash  app-release.apk\n")
+                else -> mockResponse(req, 200, multiApkJson)
+            }
+        }
+
+        val checker = UpdateChecker(client = client, currentVersion = "0.1.0")
+        val result = checker.checkForUpdate()
+
+        assertTrue(result is UpdateResult.Available)
+        val available = result as UpdateResult.Available
+        assertEquals("app-release.apk", available.release.apkAsset.name)
+        assertEquals("Selected APK checksum must match release APK hash, not debug hash", releaseHash, available.release.apkAsset.sha256)
+    }
+
+    @Test
     fun testFallbackToReleasesListWhenLatestReturns404() = runTest {
         val releasesListJson = """
             [

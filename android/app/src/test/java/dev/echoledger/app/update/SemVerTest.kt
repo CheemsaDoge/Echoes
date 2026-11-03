@@ -92,6 +92,16 @@ class SemVerTest {
         assertTrue("1.0.0-alpha must be less than 1.0.0-beta", v100Alpha < v100Beta)
         assertTrue("1.0.0-beta must be less than 1.0.0", v100Beta < v100)
 
+        // Numeric prerelease precedence: 1.0.0-rc.2 < 1.0.0-rc.10
+        val rc2 = SemVer.parse("1.0.0-rc.2")!!
+        val rc10 = SemVer.parse("1.0.0-rc.10")!!
+        assertTrue("1.0.0-rc.2 must be less than 1.0.0-rc.10", rc2 < rc10)
+
+        val alpha1 = SemVer.parse("1.0.0-alpha.1")!!
+        val alphaBeta = SemVer.parse("1.0.0-alpha.beta")!!
+        assertTrue("1.0.0-alpha must be less than 1.0.0-alpha.1", v100Alpha < alpha1)
+        assertTrue("1.0.0-alpha.1 must be less than 1.0.0-alpha.beta", alpha1 < alphaBeta)
+
         // Equality comparison
         val v010Duplicate = SemVer.parse("0.1.0")!!
         assertEquals(0, v010.compareTo(v010Duplicate))

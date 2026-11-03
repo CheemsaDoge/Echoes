@@ -15,41 +15,44 @@ android {
         versionName = "0.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
-    signingConfigs {
-        create("release") {
-            initWith(getByName("debug"))
-            val keystorePath = System.getenv("RELEASE_KEYSTORE_PATH")
-                ?: System.getenv("KEYSTORE_PATH")
-                ?: (project.findProperty("RELEASE_KEYSTORE_PATH") as? String)
-                ?: (project.findProperty("KEYSTORE_PATH") as? String)
-            if (!keystorePath.isNullOrBlank()) {
-                val ks = file(keystorePath)
-                if (ks.exists()) {
-                    storeFile = ks
-                    storePassword = System.getenv("RELEASE_KEYSTORE_PASSWORD")
-                        ?: System.getenv("KEYSTORE_PASSWORD")
-                        ?: (project.findProperty("RELEASE_KEYSTORE_PASSWORD") as? String)
-                        ?: (project.findProperty("KEYSTORE_PASSWORD") as? String)
-                        ?: "android"
-                    keyAlias = System.getenv("RELEASE_KEY_ALIAS")
-                        ?: System.getenv("KEYSTORE_ALIAS")
-                        ?: (project.findProperty("RELEASE_KEY_ALIAS") as? String)
-                        ?: (project.findProperty("KEYSTORE_ALIAS") as? String)
-                        ?: "release"
-                    keyPassword = System.getenv("RELEASE_KEY_PASSWORD")
-                        ?: System.getenv("KEY_PASSWORD")
-                        ?: (project.findProperty("RELEASE_KEY_PASSWORD") as? String)
-                        ?: (project.findProperty("KEY_PASSWORD") as? String)
-                        ?: storePassword
-                }
-            }
+    val releaseKeystorePath = System.getenv("RELEASE_KEYSTORE_PATH")
+        ?: System.getenv("KEYSTORE_PATH")
+        ?: (project.findProperty("RELEASE_KEYSTORE_PATH") as? String)
+        ?: (project.findProperty("KEYSTORE_PATH") as? String)
+
+    val releaseSigning = if (!releaseKeystorePath.isNullOrBlank()) {
+        val ks = file(releaseKeystorePath)
+        if (!ks.exists()) {
+            error("Configured release keystore file not found at: ${ks.absolutePath}")
         }
+        signingConfigs.create("release") {
+            storeFile = ks
+            storePassword = System.getenv("RELEASE_KEYSTORE_PASSWORD")
+                ?: System.getenv("KEYSTORE_PASSWORD")
+                ?: (project.findProperty("RELEASE_KEYSTORE_PASSWORD") as? String)
+                ?: (project.findProperty("KEYSTORE_PASSWORD") as? String)
+                ?: "android"
+            keyAlias = System.getenv("RELEASE_KEY_ALIAS")
+                ?: System.getenv("KEYSTORE_ALIAS")
+                ?: (project.findProperty("RELEASE_KEY_ALIAS") as? String)
+                ?: (project.findProperty("KEYSTORE_ALIAS") as? String)
+                ?: "release"
+            keyPassword = System.getenv("RELEASE_KEY_PASSWORD")
+                ?: System.getenv("KEY_PASSWORD")
+                ?: (project.findProperty("RELEASE_KEY_PASSWORD") as? String)
+                ?: (project.findProperty("KEY_PASSWORD") as? String)
+                ?: storePassword
+        }
+    } else {
+        // Fall back cleanly to debug signing config so AGP can auto-generate debug.keystore on fresh environments
+        signingConfigs.getByName("debug")
     }
+
     buildTypes {
         debug { applicationIdSuffix = ".debug" }
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("release")
+            signingConfig = releaseSigning
         }
     }
     buildFeatures { compose = true; buildConfig = true }

@@ -2,7 +2,7 @@
 .env.*
 !.env.example
 .venv/
-data/
+/data/
 *.sqlite3*
 __pycache__/
 .pytest_cache/

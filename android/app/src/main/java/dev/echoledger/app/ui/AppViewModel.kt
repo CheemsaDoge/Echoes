@@ -58,6 +58,75 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     val types = cached("types")
     val profiles = cached("profiles")
     val status = cached("status")
+    val aiClient = dev.echoledger.app.network.VertexAiClient()
+    val operationMode = MutableStateFlow(repo.prefs.operationMode)
+    val aiProvider = MutableStateFlow(repo.prefs.aiProvider)
+    val aiApiKey = MutableStateFlow(repo.prefs.aiApiKey)
+    val aiModelName = MutableStateFlow(repo.prefs.aiModelName)
+    val vertexProjectId = MutableStateFlow(repo.prefs.vertexProjectId)
+    val vertexLocation = MutableStateFlow(repo.prefs.vertexLocation)
+    val vertexEndpoint = MutableStateFlow(repo.prefs.vertexEndpoint)
+    val aiTesting = MutableStateFlow(false)
+    val aiTestResult = MutableStateFlow<String?>(null)
+    val aiTestSuccess = MutableStateFlow<Boolean?>(null)
+
+    fun saveAiConfig(
+        mode: String,
+        provider: String,
+        key: String,
+        model: String,
+        projectId: String,
+        location: String,
+        endpoint: String
+    ) {
+        repo.prefs.operationMode = mode
+        repo.prefs.aiProvider = provider
+        if (key.isNotBlank()) repo.prefs.aiApiKey = key
+        repo.prefs.aiModelName = model
+        repo.prefs.vertexProjectId = projectId
+        repo.prefs.vertexLocation = location
+        repo.prefs.vertexEndpoint = endpoint
+
+        operationMode.value = repo.prefs.operationMode
+        aiProvider.value = repo.prefs.aiProvider
+        aiApiKey.value = repo.prefs.aiApiKey
+        aiModelName.value = repo.prefs.aiModelName
+        vertexProjectId.value = repo.prefs.vertexProjectId
+        vertexLocation.value = repo.prefs.vertexLocation
+        vertexEndpoint.value = repo.prefs.vertexEndpoint
+        repo.message.value = "AI 配置已保存"
+    }
+
+    fun testAiConnection(
+        provider: String,
+        key: String,
+        model: String,
+        projectId: String = "",
+        location: String = "global",
+        endpoint: String = ""
+    ) = viewModelScope.launch {
+        aiTesting.value = true
+        aiTestResult.value = null
+        aiTestSuccess.value = null
+        val effectiveKey = if (key.isNotBlank()) key else repo.prefs.aiApiKey
+        val res = aiClient.testConnection(
+            apiKey = effectiveKey,
+            provider = provider,
+            model = model,
+            projectId = projectId,
+            location = location,
+            endpointOverride = endpoint
+        )
+        aiTesting.value = false
+        if (res.isSuccess) {
+            aiTestSuccess.value = true
+            aiTestResult.value = res.getOrNull() ?: "连接成功"
+        } else {
+            aiTestSuccess.value = false
+            aiTestResult.value = res.exceptionOrNull()?.message ?: "连接失败"
+        }
+    }
+
     private var realtime: Job? = null
     private var player: MediaPlayer? = null
 

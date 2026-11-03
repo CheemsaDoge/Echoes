@@ -20,6 +20,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -748,6 +749,26 @@ private fun Settings(
     var deletingId by remember { mutableStateOf<String?>(null) }
     val evaluation by vm.evaluation.collectAsStateWithLifecycle()
 
+    val currentMode by vm.operationMode.collectAsStateWithLifecycle()
+    val currentProvider by vm.aiProvider.collectAsStateWithLifecycle()
+    val currentApiKey by vm.aiApiKey.collectAsStateWithLifecycle()
+    val currentModel by vm.aiModelName.collectAsStateWithLifecycle()
+    val currentProjectId by vm.vertexProjectId.collectAsStateWithLifecycle()
+    val currentLocation by vm.vertexLocation.collectAsStateWithLifecycle()
+    val currentEndpoint by vm.vertexEndpoint.collectAsStateWithLifecycle()
+    val aiTesting by vm.aiTesting.collectAsStateWithLifecycle()
+    val aiTestResult by vm.aiTestResult.collectAsStateWithLifecycle()
+    val aiTestSuccess by vm.aiTestSuccess.collectAsStateWithLifecycle()
+
+    var mode by rememberSaveable { mutableStateOf(currentMode) }
+    var provider by rememberSaveable { mutableStateOf(currentProvider) }
+    var apiKey by rememberSaveable { mutableStateOf(currentApiKey) }
+    var showApiKey by rememberSaveable { mutableStateOf(false) }
+    var modelName by rememberSaveable { mutableStateOf(currentModel) }
+    var projectId by rememberSaveable { mutableStateOf(currentProjectId) }
+    var location by rememberSaveable { mutableStateOf(currentLocation) }
+    var endpoint by rememberSaveable { mutableStateOf(currentEndpoint) }
+
     Column(
         Modifier
             .fillMaxSize()
@@ -755,6 +776,176 @@ private fun Settings(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
+        Text("独立运行与 AI 配置", fontSize = 20.sp, fontWeight = FontWeight.SemiBold, color = TextWhite)
+
+        Card(
+            colors = CardDefaults.cardColors(containerColor = Panel),
+            shape = RoundedCornerShape(16.dp),
+            border = BorderStroke(1.dp, PanelBorder),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                Text("运行模式", fontSize = 14.sp, fontWeight = FontWeight.Medium, color = TextWhite)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(
+                        "standalone" to "端侧独立 (零依赖)",
+                        "server" to "专用服务端",
+                        "hybrid" to "混合模式 (端侧+远端)"
+                    ).forEach { (m, label) ->
+                        FilterChip(
+                            selected = mode == m,
+                            onClick = { mode = m },
+                            label = { Text(label, fontSize = 12.sp) }
+                        )
+                    }
+                }
+
+                if (mode == "standalone" || mode == "hybrid") {
+                    Text("AI 服务提供方", fontSize = 14.sp, fontWeight = FontWeight.Medium, color = TextWhite)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilterChip(
+                            selected = provider == "gemini_studio",
+                            onClick = { provider = "gemini_studio" },
+                            label = { Text("Google AI Studio", fontSize = 12.sp) }
+                        )
+                        FilterChip(
+                            selected = provider == "vertex_ai",
+                            onClick = { provider = "vertex_ai" },
+                            label = { Text("GCP Vertex AI", fontSize = 12.sp) }
+                        )
+                    }
+
+                    Text("转写模型", fontSize = 14.sp, fontWeight = FontWeight.Medium, color = TextWhite)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf("gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro").forEach { m ->
+                            FilterChip(
+                                selected = modelName == m,
+                                onClick = { modelName = m },
+                                label = { Text(m, fontSize = 12.sp) }
+                            )
+                        }
+                    }
+                    OutlinedTextField(
+                        value = modelName,
+                        onValueChange = { modelName = it },
+                        label = { Text("模型名称") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    OutlinedTextField(
+                        value = apiKey,
+                        onValueChange = { apiKey = it },
+                        label = { Text(if (provider == "vertex_ai") "API Key (或留空使用凭据)" else "Gemini API Key") },
+                        placeholder = { Text("AIzaSy...") },
+                        visualTransformation = if (showApiKey) VisualTransformation.None else PasswordVisualTransformation(),
+                        trailingIcon = {
+                            IconButton(onClick = { showApiKey = !showApiKey }) {
+                                Icon(
+                                    if (showApiKey) Icons.Outlined.VisibilityOff else Icons.Outlined.Visibility,
+                                    contentDescription = if (showApiKey) "隐藏" else "显示",
+                                    tint = Muted
+                                )
+                            }
+                        },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    if (provider == "vertex_ai") {
+                        OutlinedTextField(
+                            value = projectId,
+                            onValueChange = { projectId = it },
+                            label = { Text("GCP Project ID (可选)") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        OutlinedTextField(
+                            value = location,
+                            onValueChange = { location = it },
+                            label = { Text("GCP Location (默认: global)") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        OutlinedTextField(
+                            value = endpoint,
+                            onValueChange = { endpoint = it },
+                            label = { Text("自定义 Endpoint (留空默认)") },
+                            placeholder = { Text("https://...") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                        OutlinedButton(
+                            enabled = !aiTesting,
+                            onClick = { vm.testAiConnection(provider, apiKey, modelName, projectId, location, endpoint) },
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            if (aiTesting) {
+                                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = Accent)
+                                Spacer(Modifier.width(8.dp))
+                            }
+                            Text(if (aiTesting) "测试中..." else "测试连接")
+                        }
+                        Button(
+                            onClick = {
+                                vm.saveAiConfig(mode, provider, apiKey, modelName, projectId, location, endpoint)
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = Accent),
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("保存配置", color = Background, fontWeight = FontWeight.Bold)
+                        }
+                    }
+
+                    aiTestResult?.let { result ->
+                        val isSuccess = aiTestSuccess == true
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = if (isSuccess) Accent.copy(alpha = 0.12f) else Danger.copy(alpha = 0.12f),
+                            border = BorderStroke(1.dp, if (isSuccess) Accent.copy(alpha = 0.4f) else Danger.copy(alpha = 0.4f)),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    if (isSuccess) Icons.Outlined.CheckCircle else Icons.Outlined.ErrorOutline,
+                                    contentDescription = null,
+                                    tint = if (isSuccess) Accent else Danger,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Text(
+                                    result,
+                                    fontSize = 12.sp,
+                                    color = if (isSuccess) Accent else Danger
+                                )
+                            }
+                        }
+                    }
+                } else {
+                    Button(
+                        onClick = {
+                            vm.saveAiConfig(mode, provider, apiKey, modelName, projectId, location, endpoint)
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Accent),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("保存模式", color = Background, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+
+        HorizontalDivider(color = PanelBorder)
+
         Text("连接与服务", fontSize = 20.sp, fontWeight = FontWeight.SemiBold, color = TextWhite)
         OutlinedTextField(
             url,

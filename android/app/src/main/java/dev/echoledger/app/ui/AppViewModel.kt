@@ -14,7 +14,9 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dev.echoledger.app.EchoApp
 import dev.echoledger.app.capture.RecordingBus
+import dev.echoledger.app.data.Repository
 import dev.echoledger.app.network.UploadScheduler
+import dev.echoledger.app.update.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import org.json.JSONObject
@@ -23,9 +25,15 @@ import java.time.LocalDate
 
 data class SessionAudioInfo(val chunkCount: Int, val totalSamples: Long)
 
-class AppViewModel(application: Application) : AndroidViewModel(application) {
-    private val graph = (application as EchoApp).graph
-    val repo = graph.repository
+class AppViewModel @JvmOverloads constructor(
+    application: Application,
+    repository: Repository? = null,
+    val updateChecker: UpdateChecker = UpdateChecker(),
+    val updateDownloader: UpdateDownloader = UpdateDownloader(application),
+    val updateInstaller: UpdateInstaller = UpdateInstaller
+) : AndroidViewModel(application) {
+    val graph = (application as? EchoApp)?.graph
+    val repo = repository ?: graph?.repository ?: error("EchoApp graph or repository required")
     val day = MutableStateFlow(LocalDate.now())
     val busy = MutableStateFlow(false)
     val detail = MutableStateFlow<JSONObject?>(null)
@@ -33,6 +41,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     val recording = RecordingBus.state
     val pending = repo.dao.pendingCount().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
     val localSessions = repo.dao.observeSessions().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    private val _updateState = MutableStateFlow<UpdateState>(UpdateState.Idle)
+    val updateState: StateFlow<UpdateState> = _updateState.asStateFlow()
+    val lastCheckedAtMs = MutableStateFlow<Long?>(null)
+
+    private var downloadJob: Job? = null
+    private var activeRelease: UpdateRelease? = null
 
     val sessionStats: StateFlow<Map<String, SessionAudioInfo>> = combine(
         repo.dao.observeSessions(),
@@ -136,7 +151,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         if (repo.prefs.token.isBlank()) return
         refresh()
         realtime = viewModelScope.launch {
-            graph.ready.await()
+            graph?.ready?.await()
             repo.api.changes().conflate().onEach { cursor ->
                 repo.refresh(day.value)
                 repo.prefs.cursor = cursor
@@ -150,7 +165,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun refresh() = act { repo.refresh(day.value); UploadScheduler.enqueue(getApplication()) }
     fun act(block: suspend CoroutineScope.() -> Unit): Job = viewModelScope.launch {
         busy.value = true
-        try { graph.ready.await(); block() }
+        try { graph?.ready?.await(); block() }
         catch (cancel: CancellationException) { throw cancel }
         catch (e: Exception) { repo.message.value = e.message?.take(220) ?: e.javaClass.simpleName }
         finally { busy.value = false }
@@ -326,9 +341,99 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun checkForUpdates(silent: Boolean = false): Job = viewModelScope.launch {
+        if (!silent) {
+            _updateState.value = UpdateState.Checking
+        }
+        when (val result = updateChecker.checkForUpdate()) {
+            is UpdateResult.Available -> {
+                lastCheckedAtMs.value = System.currentTimeMillis()
+                activeRelease = result.release
+                _updateState.value = UpdateState.UpdateAvailable(result.release)
+            }
+            is UpdateResult.UpToDate -> {
+                lastCheckedAtMs.value = System.currentTimeMillis()
+                _updateState.value = UpdateState.UpToDate(result.currentVersion)
+            }
+            is UpdateResult.Error -> {
+                if (!silent) {
+                    _updateState.value = UpdateState.Error(result.message, result.canRetry)
+                } else if (_updateState.value is UpdateState.Checking) {
+                    _updateState.value = UpdateState.Idle
+                }
+            }
+        }
+    }
+
+    fun startDownload(release: UpdateRelease): Job {
+        activeRelease = release
+        downloadJob?.cancel()
+
+        if (updateDownloader.isApkDownloaded(release.versionName)) {
+            val apkFile = updateDownloader.getApkFile(release.versionName)
+            _updateState.value = UpdateState.ReadyToInstall(apkFile, release)
+            return CompletableDeferred(Unit)
+        }
+
+        _updateState.value = UpdateState.Downloading(0L, release.apkAsset.sizeBytes, 0)
+        val job = viewModelScope.launch {
+            try {
+                updateDownloader.download(release).collect { progress ->
+                    _updateState.value = UpdateState.Downloading(
+                        bytesRead = progress.bytesRead,
+                        totalBytes = progress.totalBytes,
+                        percent = progress.percent
+                    )
+                }
+                val apkFile = updateDownloader.getApkFile(release.versionName)
+                _updateState.value = UpdateState.ReadyToInstall(apkFile, release)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _updateState.value = UpdateState.Error(
+                    message = e.message ?: "下载更新失败: ${e.javaClass.simpleName}",
+                    canRetry = true
+                )
+            }
+        }
+        downloadJob = job
+        return job
+    }
+
+    fun cancelDownload() {
+        downloadJob?.cancel()
+        downloadJob = null
+        val current = _updateState.value
+        if (current is UpdateState.Downloading) {
+            _updateState.value = activeRelease?.let { UpdateState.UpdateAvailable(it) } ?: UpdateState.Idle
+        }
+    }
+
+    fun installUpdate(context: Context, apkFile: File) {
+        when (val result = updateInstaller.install(context, apkFile)) {
+            is UpdateInstaller.InstallResult.Launched -> {
+                // Launched package installer
+            }
+            is UpdateInstaller.InstallResult.PermissionRequired -> {
+                repo.message.value = "请在系统设置中允许 EchoLedger 安装未知应用"
+            }
+            is UpdateInstaller.InstallResult.Error -> {
+                _updateState.value = UpdateState.Error(result.message, canRetry = true)
+                repo.message.value = result.message
+            }
+        }
+    }
+
+    fun dismissUpdate() {
+        downloadJob?.cancel()
+        downloadJob = null
+        _updateState.value = UpdateState.Idle
+    }
+
     override fun onCleared() {
         disconnect()
         stopPlayback()
+        downloadJob?.cancel()
         super.onCleared()
     }
 }

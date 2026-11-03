@@ -25,9 +25,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import dev.echoledger.app.BuildConfig
 import dev.echoledger.app.capture.CaptureState
 import dev.echoledger.app.data.LocalSession
+import dev.echoledger.app.update.UpdateRelease
+import dev.echoledger.app.update.UpdateState
 import org.json.JSONObject
+import java.io.File
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -1131,6 +1135,11 @@ private fun Settings(
                 }
             }
         }
+
+        HorizontalDivider(color = PanelBorder)
+
+        AboutAndUpdateCard(vm)
+
         Spacer(Modifier.height(20.dp))
     }
 
@@ -1147,6 +1156,359 @@ private fun Settings(
             }
         )
     }
+}
+
+@Composable
+private fun AboutAndUpdateCard(vm: AppViewModel) {
+    val context = LocalContext.current
+    val updateState by vm.updateState.collectAsStateWithLifecycle()
+    val lastChecked by vm.lastCheckedAtMs.collectAsStateWithLifecycle()
+    var detailRelease by remember { mutableStateOf<UpdateRelease?>(null) }
+
+    Card(
+        colors = CardDefaults.cardColors(containerColor = Panel),
+        shape = RoundedCornerShape(16.dp),
+        border = BorderStroke(1.dp, PanelBorder),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("关于与应用更新", fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = TextWhite)
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = Accent.copy(alpha = 0.12f),
+                    border = BorderStroke(1.dp, Accent.copy(alpha = 0.35f))
+                ) {
+                    Text(
+                        "v${BuildConfig.VERSION_NAME}",
+                        color = Accent,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                    )
+                }
+            }
+
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("EchoLedger (Echoes)", fontSize = 15.sp, fontWeight = FontWeight.Medium, color = TextWhite)
+                Text(
+                    "当前版本: v${BuildConfig.VERSION_NAME} (Build ${BuildConfig.VERSION_CODE})",
+                    fontSize = 12.sp,
+                    color = Muted
+                )
+                Text(
+                    "更新通道: GitHub: CheemsaDoge/Echoes",
+                    fontSize = 12.sp,
+                    color = Muted
+                )
+            }
+
+            HorizontalDivider(color = PanelBorder.copy(alpha = 0.6f))
+
+            when (val state = updateState) {
+                is UpdateState.Idle -> {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        val statusText = lastChecked?.let { "上次检查: ${formatTimestamp(it)}" } ?: "尚未检查"
+                        Text(statusText, fontSize = 12.sp, color = Muted)
+                        Button(
+                            onClick = { vm.checkForUpdates() },
+                            colors = ButtonDefaults.buttonColors(containerColor = Accent),
+                            shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
+                        ) {
+                            Text("检查更新", color = Background, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        }
+                    }
+                }
+                is UpdateState.Checking -> {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp,
+                            color = Accent
+                        )
+                        Text("正在检查最新版本...", fontSize = 13.sp, color = TextWhite)
+                    }
+                }
+                is UpdateState.UpToDate -> {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Icon(
+                                Icons.Outlined.CheckCircle,
+                                contentDescription = null,
+                                tint = Accent,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Text("已是最新版本", fontSize = 13.sp, color = Accent, fontWeight = FontWeight.Medium)
+                        }
+                        OutlinedButton(
+                            onClick = { vm.checkForUpdates() },
+                            shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                        ) {
+                            Text("重新检查", fontSize = 12.sp)
+                        }
+                    }
+                }
+                is UpdateState.UpdateAvailable -> {
+                    val release = state.release
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = Accent.copy(alpha = 0.2f),
+                                border = BorderStroke(1.dp, Accent)
+                            ) {
+                                Text(
+                                    release.versionName,
+                                    color = Accent,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 12.sp,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                            Text(
+                                release.title,
+                                fontSize = 13.sp,
+                                color = TextWhite,
+                                fontWeight = FontWeight.Medium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Button(
+                                onClick = { vm.startDownload(release) },
+                                colors = ButtonDefaults.buttonColors(containerColor = Accent),
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("立即更新", color = Background, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                            }
+                            OutlinedButton(
+                                onClick = { detailRelease = release },
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("查看详情", fontSize = 13.sp)
+                            }
+                        }
+                    }
+                }
+                is UpdateState.Downloading -> {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            val downloadedMb = state.bytesRead.toFloat() / (1024 * 1024)
+                            val totalMb = state.totalBytes.toFloat() / (1024 * 1024)
+                            val percentStr = if (state.percent >= 0) "${state.percent}%" else "--"
+                            Text(
+                                "%.1f MB / %.1f MB ($percentStr)".format(downloadedMb, totalMb),
+                                fontSize = 12.sp,
+                                color = TextWhite
+                            )
+                            TextButton(
+                                onClick = { vm.cancelDownload() },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                            ) {
+                                Text("取消", color = Danger, fontSize = 12.sp)
+                            }
+                        }
+                        val progressFraction = if (state.percent in 0..100) state.percent / 100f else 0f
+                        LinearProgressIndicator(
+                            progress = { progressFraction },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(6.dp)
+                                .clip(RoundedCornerShape(3.dp)),
+                            color = Accent,
+                            trackColor = PanelBorder
+                        )
+                    }
+                }
+                is UpdateState.ReadyToInstall -> {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Icon(
+                                Icons.Outlined.CheckCircle,
+                                contentDescription = null,
+                                tint = Accent,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            val verText = state.release?.versionName?.let { " ($it)" } ?: ""
+                            Text("新版本${verText}已下载完成", fontSize = 13.sp, color = Accent, fontWeight = FontWeight.Medium)
+                        }
+                        Button(
+                            onClick = { vm.installUpdate(context, state.apkFile) },
+                            colors = ButtonDefaults.buttonColors(containerColor = Accent),
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("立即安装", color = Background, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        }
+                    }
+                }
+                is UpdateState.Error -> {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(
+                                Icons.Outlined.ErrorOutline,
+                                contentDescription = null,
+                                tint = Danger,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Text(
+                                state.message,
+                                fontSize = 12.sp,
+                                color = Danger,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                        if (state.canRetry) {
+                            OutlinedButton(
+                                onClick = { vm.checkForUpdates() },
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.align(Alignment.End),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                            ) {
+                                Text("重试", fontSize = 12.sp)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    detailRelease?.let { release ->
+        UpdateDialog(
+            release = release,
+            onDismiss = { detailRelease = null },
+            onDownload = {
+                detailRelease = null
+                vm.startDownload(release)
+            }
+        )
+    }
+}
+
+@Composable
+private fun UpdateDialog(
+    release: UpdateRelease,
+    onDismiss: () -> Unit,
+    onDownload: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        release.versionName,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 18.sp,
+                        color = TextWhite
+                    )
+                    Surface(
+                        shape = RoundedCornerShape(6.dp),
+                        color = Accent.copy(alpha = 0.15f),
+                        border = BorderStroke(1.dp, Accent.copy(alpha = 0.4f))
+                    ) {
+                        Text(
+                            "新版本",
+                            color = Accent,
+                            fontSize = 11.sp,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                    }
+                }
+                if (release.publishedAt.isNotBlank()) {
+                    Text("发布时间: ${release.publishedAt}", fontSize = 11.sp, color = Muted)
+                }
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 380.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                if (release.title.isNotBlank() && release.title != release.versionName) {
+                    Text(release.title, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = TextWhite)
+                }
+                if (release.apkAsset.sizeBytes > 0) {
+                    val sizeMb = release.apkAsset.sizeBytes.toFloat() / (1024 * 1024)
+                    Text("安装包大小: %.1f MB".format(sizeMb), fontSize = 12.sp, color = Muted)
+                }
+                HorizontalDivider(color = PanelBorder.copy(alpha = 0.5f))
+                Text(
+                    if (release.changelog.isNotBlank()) release.changelog else "暂无更新日志",
+                    fontSize = 13.sp,
+                    color = TextWhite,
+                    lineHeight = 20.sp
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onDownload,
+                colors = ButtonDefaults.buttonColors(containerColor = Accent),
+                shape = RoundedCornerShape(8.dp)
+            ) {
+                Text("立即下载", color = Background, fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("关闭")
+            }
+        }
+    )
 }
 
 private data class Turn(val id: String, val label: String, val name: String, var text: String, val start: Long, var end: Long, val chunkId: String)

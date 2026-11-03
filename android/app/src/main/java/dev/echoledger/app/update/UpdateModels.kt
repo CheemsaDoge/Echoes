@@ -1,0 +1,117 @@
+package dev.echoledger.app.update
+
+import java.io.File
+
+/**
+ * Semantic Versioning contract supporting standard SemVer 2.0.0 comparisons.
+ */
+data class SemVer(
+    val major: Int,
+    val minor: Int,
+    val patch: Int,
+    val preRelease: String? = null
+) : Comparable<SemVer> {
+
+    override fun compareTo(other: SemVer): Int {
+        if (major != other.major) return major.compareTo(other.major)
+        if (minor != other.minor) return minor.compareTo(other.minor)
+        if (patch != other.patch) return patch.compareTo(other.patch)
+
+        // According to SemVer 2.0.0:
+        // A normal version has higher precedence than a pre-release version:
+        // 1.0.0 > 1.0.0-alpha
+        return when {
+            preRelease == null && other.preRelease == null -> 0
+            preRelease == null && other.preRelease != null -> 1
+            preRelease != null && other.preRelease == null -> -1
+            else -> (preRelease ?: "").compareTo(other.preRelease ?: "")
+        }
+    }
+
+    override fun toString(): String {
+        return if (preRelease != null) "$major.$minor.$patch-$preRelease" else "$major.$minor.$patch"
+    }
+
+    companion object {
+        fun parse(version: String): SemVer? {
+            val trimmed = version.trim()
+            if (trimmed.isEmpty()) return null
+            val stripped = if (trimmed.startsWith("v", ignoreCase = true)) {
+                trimmed.substring(1).trim()
+            } else {
+                trimmed
+            }
+            if (stripped.isEmpty()) return null
+
+            // Strip build metadata after '+'
+            val withoutBuild = stripped.substringBefore('+')
+            val dashIndex = withoutBuild.indexOf('-')
+            val corePart = if (dashIndex >= 0) withoutBuild.substring(0, dashIndex) else withoutBuild
+            val preRelease = if (dashIndex >= 0) withoutBuild.substring(dashIndex + 1).takeIf { it.isNotEmpty() } else null
+
+            val parts = corePart.split('.')
+            if (parts.size != 3) return null
+
+            val major = parts[0].toIntOrNull() ?: return null
+            val minor = parts[1].toIntOrNull() ?: return null
+            val patch = parts[2].toIntOrNull() ?: return null
+
+            if (major < 0 || minor < 0 || patch < 0) return null
+
+            return SemVer(major, minor, patch, preRelease)
+        }
+    }
+}
+
+/**
+ * APK asset contract extracted from GitHub Release assets.
+ */
+data class ApkAsset(
+    val name: String,
+    val sizeBytes: Long,
+    val downloadUrl: String,
+    val sha256: String? = null
+)
+
+/**
+ * Metadata for a downloadable GitHub Release.
+ */
+data class UpdateRelease(
+    val versionName: String,
+    val semVer: SemVer,
+    val title: String,
+    val changelog: String,
+    val publishedAt: String,
+    val apkAsset: ApkAsset
+)
+
+/**
+ * Result returned by UpdateChecker queries.
+ */
+sealed interface UpdateResult {
+    data class Available(val release: UpdateRelease) : UpdateResult
+    data class UpToDate(val currentVersion: String) : UpdateResult
+    data class Error(val message: String, val canRetry: Boolean = true) : UpdateResult
+}
+
+/**
+ * Progress payload emitted during APK download streaming.
+ */
+data class DownloadProgress(
+    val bytesRead: Long,
+    val totalBytes: Long,
+    val percent: Int
+)
+
+/**
+ * High-level state representing the lifecycle of update checking and downloading.
+ */
+sealed interface UpdateState {
+    data object Idle : UpdateState
+    data object Checking : UpdateState
+    data class UpToDate(val currentVersion: String, val checkedAtMs: Long = System.currentTimeMillis()) : UpdateState
+    data class UpdateAvailable(val release: UpdateRelease) : UpdateState
+    data class Downloading(val bytesRead: Long, val totalBytes: Long, val percent: Int) : UpdateState
+    data class ReadyToInstall(val apkFile: File, val release: UpdateRelease? = null) : UpdateState
+    data class Error(val message: String, val canRetry: Boolean = true) : UpdateState
+}

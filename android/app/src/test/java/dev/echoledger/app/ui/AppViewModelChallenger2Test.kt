@@ -261,6 +261,7 @@ class AppViewModelChallenger2Test {
 
         // 2. Cancel download mid-stream
         vm.cancelDownload()
+        downloadJob.join()
         testDispatcher.scheduler.advanceUntilIdle()
 
         // 3. Verify state reverted back to UpdateAvailable
@@ -312,6 +313,7 @@ class AppViewModelChallenger2Test {
     @Test
     fun testRecheckingAfterRetryableErrorRecoversToAvailableState() = runTest {
         var failFirst = true
+        val retryLatch = java.util.concurrent.CountDownLatch(1)
         val releaseJson = """
             {
               "tag_name": "v1.2.0",
@@ -333,6 +335,7 @@ class AppViewModelChallenger2Test {
                 failFirst = false
                 mockJsonResponse(req, 500, "Internal Server Error")
             } else {
+                retryLatch.await()
                 mockJsonResponse(req, 200, releaseJson)
             }
         }
@@ -360,6 +363,8 @@ class AppViewModelChallenger2Test {
         testDispatcher.scheduler.runCurrent()
         assertEquals("State must switch to Checking upon retry", UpdateState.Checking, vm.updateState.value)
 
+        // Release the latch to let retry complete
+        retryLatch.countDown()
         testDispatcher.scheduler.advanceUntilIdle()
         job2.join()
 
@@ -372,7 +377,8 @@ class AppViewModelChallenger2Test {
 
     @Test
     fun testRecheckingAfterNonRetryableErrorRecoversWhenNewReleaseAppears() = runTest {
-        var return404 = true
+        var checkAttempt = 1
+        val recheckLatch = java.util.concurrent.CountDownLatch(1)
         val releaseJson = """
             {
               "tag_name": "v1.3.0",
@@ -390,10 +396,11 @@ class AppViewModelChallenger2Test {
         """.trimIndent()
 
         val mockClient = createMockClient { req ->
-            if (return404) {
-                return404 = false
+            if (checkAttempt == 1) {
+                // Both /releases/latest and fallback /releases?per_page=1 return 404 on empty repo
                 mockJsonResponse(req, 404, "Not Found")
             } else {
+                recheckLatch.await()
                 mockJsonResponse(req, 200, releaseJson)
             }
         }
@@ -418,10 +425,13 @@ class AppViewModelChallenger2Test {
         assertEquals("当前仓库暂无发布的版本", (state1 as UpdateState.Error).message)
 
         // 2. User clicks "重新检查" -> calls checkForUpdates()
+        checkAttempt = 2
         val job2 = vm.checkForUpdates(silent = false)
         testDispatcher.scheduler.runCurrent()
         assertEquals(UpdateState.Checking, vm.updateState.value)
 
+        // Release the latch to let recheck complete
+        recheckLatch.countDown()
         testDispatcher.scheduler.advanceUntilIdle()
         job2.join()
 
@@ -675,9 +685,10 @@ class AppViewModelChallenger2Test {
 
     @Test
     fun testChallenge3MergedManifestsContainRequestInstallPackagesAndFileProvider() {
-        var cur = File(System.getProperty("user.dir") ?: ".").canonicalFile
+        var cur: File = File(System.getProperty("user.dir") ?: ".").canonicalFile
         while (cur.parentFile != null && !File(cur, "src/main/AndroidManifest.xml").exists() && !File(cur, "android/app/src/main/AndroidManifest.xml").exists()) {
-            cur = cur.parentFile
+            val parent = cur.parentFile ?: break
+            cur = parent
         }
         val appDir = if (File(cur, "src/main/AndroidManifest.xml").exists()) cur else File(cur, "android/app")
 

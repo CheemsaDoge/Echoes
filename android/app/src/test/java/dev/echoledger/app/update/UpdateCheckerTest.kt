@@ -419,4 +419,49 @@ class UpdateCheckerTest {
         assertTrue("Error message must indicate failure", error.message.contains("检查更新失败"))
         assertTrue("Network errors should be retryable", error.canRetry)
     }
+
+    @Test
+    fun testCollectiveChecksumsPrefersExactCaseMatchOverCaseInsensitive() = runTest {
+        val upperHash = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        val lowerHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        val releaseJson = """
+            {
+              "tag_name": "v0.7.0",
+              "name": "EchoLedger v0.7.0",
+              "body": "",
+              "assets": [
+                {
+                  "name": "sha256sums.txt",
+                  "browser_download_url": "https://example.com/sha256sums.txt"
+                },
+                {
+                  "name": "app-release.apk",
+                  "size": 16000000,
+                  "browser_download_url": "https://example.com/app-release.apk"
+                }
+              ]
+            }
+        """.trimIndent()
+
+        val checksumsFileContent = """
+            $upperHash  APP-release.apk
+            $lowerHash  app-release.apk
+        """.trimIndent()
+
+        val client = createMockClient { req ->
+            if (req.url.toString().endsWith("sha256sums.txt")) {
+                mockResponse(req, 200, checksumsFileContent)
+            } else {
+                mockResponse(req, 200, releaseJson)
+            }
+        }
+
+        val checker = UpdateChecker(client = client, currentVersion = "0.1.0")
+        val result = checker.checkForUpdate()
+
+        assertTrue(result is UpdateResult.Available)
+        val available = result as UpdateResult.Available
+        assertEquals("app-release.apk", available.release.apkAsset.name)
+        assertEquals("Must match exact-case entry", lowerHash, available.release.apkAsset.sha256)
+    }
 }

@@ -329,4 +329,34 @@ class UpdateDownloaderTest {
 
         assertFalse("isApkDownloaded must return false", downloader.isApkDownloaded("0.9.2"))
     }
+
+    @Test
+    fun testFailedRetryPreservesExistingVerifiedApk() = runTest {
+        val downloadDir = tempFolder.newFolder("updates")
+        val existingFile = File(downloadDir, "update_1.0.0.apk").apply {
+            writeText("previously-verified-apk-content")
+        }
+        assertTrue("Pre-existing file must exist", existingFile.exists())
+
+        val client = createMockClient { req ->
+            Response.Builder()
+                .request(req)
+                .protocol(Protocol.HTTP_1_1)
+                .code(500)
+                .message("Server error")
+                .body("Failed".toResponseBody("text/plain".toMediaType()))
+                .build()
+        }
+
+        val downloader = UpdateDownloader(downloadDir = downloadDir, client = client)
+        val apkAsset = ApkAsset("app.apk", 1000, "https://example.com/fail.apk")
+
+        try {
+            downloader.download(apkAsset, "1.0.0").collect()
+            fail("Must throw IOException on HTTP 500")
+        } catch (_: IOException) {}
+
+        assertTrue("Pre-existing file must be preserved after failed retry attempt", existingFile.exists())
+        assertEquals("previously-verified-apk-content", existingFile.readText())
+    }
 }

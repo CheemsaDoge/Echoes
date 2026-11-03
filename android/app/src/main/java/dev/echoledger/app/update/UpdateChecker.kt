@@ -284,6 +284,7 @@ class UpdateChecker(
             client.newCall(request).execute().use { resp ->
                 if (resp.isSuccessful) {
                     val text = resp.body?.string().orEmpty()
+                    val parsedLines = mutableListOf<Pair<String, String>>()
                     for (line in text.lines()) {
                         val trimmedLine = line.trim()
                         if (trimmedLine.isEmpty() || trimmedLine.startsWith("#")) continue
@@ -291,6 +292,18 @@ class UpdateChecker(
                         val hash = hashMatch.groupValues[1].lowercase()
                         val rest = trimmedLine.replace(hashMatch.value, "").trim().removePrefix("*").trim()
                         val fileName = rest.substringAfterLast('/').substringAfterLast('\\').trim()
+                        parsedLines.add(fileName to hash)
+                    }
+
+                    // Pass 1: exact-case match
+                    for ((fileName, hash) in parsedLines) {
+                        if (fileName == targetApkName) {
+                            return hash
+                        }
+                    }
+
+                    // Pass 2: case-insensitive match
+                    for ((fileName, hash) in parsedLines) {
                         if (fileName.equals(targetApkName, ignoreCase = true)) {
                             return hash
                         }

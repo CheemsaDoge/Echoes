@@ -67,6 +67,7 @@ class UpdateDownloader(
         val call = client.newCall(request)
 
         coroutineScope {
+            var publicationStarted = false
             val watcher = launch(Dispatchers.Default) {
                 try {
                     awaitCancellation()
@@ -124,14 +125,13 @@ class UpdateDownloader(
                         val expectedHash = apkAsset.sha256.trim().lowercase()
                         if (!calculatedHash.equals(expectedHash, ignoreCase = true)) {
                             tempFile.delete()
-                            destinationFile.delete()
                             throw SecurityException("SHA-256 校验失败: 期望 $expectedHash, 实际 $calculatedHash")
                         }
                     }
 
                     // Publish atomically only after full verification
-                    var published = false
                     try {
+                        publicationStarted = true
                         if (destinationFile.exists()) {
                             destinationFile.delete()
                         }
@@ -139,7 +139,6 @@ class UpdateDownloader(
                             tempFile.copyTo(destinationFile, overwrite = true)
                             tempFile.delete()
                         }
-                        published = true
                     } catch (e: Throwable) {
                         destinationFile.delete()
                         throw e
@@ -151,7 +150,9 @@ class UpdateDownloader(
                 }
             } catch (e: Throwable) {
                 tempFile.delete()
-                destinationFile.delete()
+                if (publicationStarted) {
+                    destinationFile.delete()
+                }
                 throw e
             } finally {
                 watcher.cancel()

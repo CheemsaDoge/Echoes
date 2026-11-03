@@ -92,9 +92,27 @@ class RecordingService : Service() {
             writer = null
             val wav = current.finish()
             if (wav != null) {
-                local.register(wav, meta!!)
+                val chunkMeta = meta!!
+                local.register(wav, chunkMeta)
                 finalized = seq
-                UploadScheduler.enqueue(this)
+                val mode = graph.prefs.operationMode
+                if (mode == "standalone" || mode == "hybrid") {
+                    val chunkId = chunkMeta.getString("id")
+                    scope.launch {
+                        val chunk = graph.database.dao().chunk(chunkId)
+                        if (chunk != null) {
+                            try {
+                                val transcriber = dev.echoledger.app.data.StandaloneTranscriber(graph.database.dao(), graph.prefs)
+                                transcriber.processChunk(chunk)
+                            } catch (_: Exception) {
+                                dev.echoledger.app.network.StandaloneScheduler.enqueue(this@RecordingService)
+                            }
+                        }
+                    }
+                }
+                if (mode == "server" || mode == "hybrid") {
+                    UploadScheduler.enqueue(this@RecordingService)
+                }
                 seq += 1
             }
         }
@@ -154,8 +172,13 @@ class RecordingService : Service() {
             if (wake?.isHeld == true) wake.release()
             withContext(NonCancellable) {
                 try { finishChunk() } catch (e: Exception) { interrupted = true; needsRecovery = true; error = "Chunk needs recovery: ${e.javaClass.simpleName}" }
-                if (graph.database.dao().session(id) != null) graph.database.dao().finishSession(id, finalized, if (needsRecovery) "needs_recovery" else if (interrupted) "interrupted" else "stopped")
-                UploadScheduler.enqueue(this@RecordingService)
+                val mode = graph.prefs.operationMode
+                if (mode == "standalone" || mode == "hybrid") {
+                    dev.echoledger.app.network.StandaloneScheduler.enqueue(this@RecordingService)
+                }
+                if (mode == "server" || mode == "hybrid") {
+                    UploadScheduler.enqueue(this@RecordingService)
+                }
             }
             RecordingBus.mutable.value = CaptureState(false, id, purpose, total, error = error)
             stopForeground(STOP_FOREGROUND_REMOVE)

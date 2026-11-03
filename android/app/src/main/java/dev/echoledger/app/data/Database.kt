@@ -60,6 +60,9 @@ abstract class JournalDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE) abstract suspend fun putCache(entries: List<CacheEntry>)
     @Query("DELETE FROM cache WHERE kind=:kind") abstract suspend fun clearKind(kind: String)
     @Query("DELETE FROM cache WHERE kind='events' AND endMs>=:from AND sortMs<:to") abstract suspend fun clearEventsRange(from: Long, to: Long)
+    @Query("SELECT * FROM cache WHERE kind=:kind AND id=:id LIMIT 1") abstract suspend fun getCacheEntry(kind: String, id: String): CacheEntry?
+    @Query("DELETE FROM cache WHERE kind=:kind AND id=:id") abstract suspend fun deleteCacheEntry(kind: String, id: String)
+    @Query("DELETE FROM cache WHERE id IN (SELECT id FROM chunks WHERE sessionId=:sessionId)") abstract suspend fun deleteSessionCache(sessionId: String)
     @Query("DELETE FROM cache") abstract suspend fun clearCache()
     @Query("DELETE FROM chunks WHERE sessionId=:id") abstract suspend fun deleteChunks(id: String)
     @Query("DELETE FROM sessions WHERE id=:id") abstract suspend fun deleteSession(id: String)

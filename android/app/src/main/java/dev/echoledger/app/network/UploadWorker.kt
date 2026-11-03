@@ -26,6 +26,7 @@ class UploadWorker(context: Context, params: WorkerParameters) : CoroutineWorker
         val graph = (applicationContext as EchoApp).graph
         graph.ready.await()
         val repo = graph.repository
+        if (graph.prefs.operationMode == "standalone") return Result.success()
         if (graph.prefs.token.isBlank() || graph.prefs.baseUrl.isBlank()) return Result.success()
         val deadline = android.os.SystemClock.elapsedRealtime() + 8 * 60 * 1000
         try {

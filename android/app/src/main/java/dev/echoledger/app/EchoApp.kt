@@ -24,6 +24,8 @@ class AppGraph(val app: Application) {
             finally { ready.complete(Unit) }
             UploadScheduler.scheduleRecovery(app)
             UploadScheduler.enqueue(app)
+            dev.echoledger.app.network.StandaloneScheduler.scheduleRecovery(app)
+            dev.echoledger.app.network.StandaloneScheduler.enqueue(app)
         }
     }
 }

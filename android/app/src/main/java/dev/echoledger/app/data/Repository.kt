@@ -47,13 +47,67 @@ class Repository(private val context: Context, val dao: JournalDao, val prefs: S
         dao.replace("status", listOf(CacheEntry("status", "status", payload = status.toString())))
         message.value = ""
     }
-    suspend fun getEvent(id: String): JSONObject = JSONObject(api.call("/v1/events/$id"))
-    suspend fun createSpeaker(name: String) { api.call("/v1/speakers", "POST", JSONObject().put("name", name)) }
+    suspend fun getEvent(id: String): JSONObject {
+        val local = dao.getCacheEntry("events", id)
+        if (prefs.operationMode == "standalone" || prefs.token.isBlank() || prefs.baseUrl.isBlank()) {
+            return local?.let { JSONObject(it.payload) } ?: error("Event not found")
+        }
+        return try {
+            JSONObject(api.call("/v1/events/$id"))
+        } catch (e: Exception) {
+            local?.let { JSONObject(it.payload) } ?: throw e
+        }
+    }
+    suspend fun updateEventTitleLocally(id: String, newTitle: String) {
+        val entry = dao.getCacheEntry("events", id) ?: return
+        val json = JSONObject(entry.payload).put("title", newTitle).put("updated_ms", System.currentTimeMillis())
+        dao.putCache(listOf(entry.copy(payload = json.toString())))
+    }
+    suspend fun createSpeaker(name: String) {
+        if (prefs.operationMode == "standalone" || prefs.token.isBlank()) {
+            val id = "speaker_" + (System.currentTimeMillis() % 10000)
+            val json = JSONObject().put("id", id).put("name", name)
+            dao.putCache(listOf(CacheEntry("speakers", id, 0, 0, json.toString())))
+            return
+        }
+        api.call("/v1/speakers", "POST", JSONObject().put("name", name))
+    }
     suspend fun assignSpeaker(segmentId: String, speakerId: String?) {
+        if (prefs.operationMode == "standalone" || prefs.token.isBlank()) {
+            val chunkId = segmentId.substringBefore('_')
+            val entry = dao.getCacheEntry("events", chunkId) ?: return
+            val json = JSONObject(entry.payload)
+            val segments = json.optJSONArray("segments") ?: return
+            val speakerName = if (speakerId != null) {
+                dao.getCacheEntry("speakers", speakerId)?.let { JSONObject(it.payload).optString("name") } ?: speakerId
+            } else null
+            for (i in 0 until segments.length()) {
+                val seg = segments.getJSONObject(i)
+                if (seg.optString("id") == segmentId) {
+                    seg.put("speaker_name", speakerName ?: JSONObject.NULL)
+                }
+            }
+            dao.putCache(listOf(entry.copy(payload = json.toString())))
+            return
+        }
         api.call("/v1/segments/$segmentId/speaker", "PUT", JSONObject().put("speaker_id", speakerId ?: JSONObject.NULL))
     }
-    suspend fun confirmMemory(id: String, confirmed: Boolean) { api.call("/v1/memories/$id", "PATCH", JSONObject().put("confirmed", confirmed)) }
-    suspend fun deleteMemory(id: String) { api.call("/v1/memories/$id", "DELETE") }
+    suspend fun confirmMemory(id: String, confirmed: Boolean) {
+        if (prefs.operationMode == "standalone" || prefs.token.isBlank()) {
+            val entry = dao.getCacheEntry("memories", id) ?: return
+            val json = JSONObject(entry.payload).put("confirmed", if (confirmed) 1 else 0)
+            dao.putCache(listOf(entry.copy(payload = json.toString())))
+            return
+        }
+        api.call("/v1/memories/$id", "PATCH", JSONObject().put("confirmed", confirmed))
+    }
+    suspend fun deleteMemory(id: String) {
+        if (prefs.operationMode == "standalone" || prefs.token.isBlank()) {
+            dao.deleteCacheEntry("memories", id)
+            return
+        }
+        api.call("/v1/memories/$id", "DELETE")
+    }
     suspend fun saveProfile(name: String, config: JSONObject) { api.call("/v1/vad/profiles", "POST", JSONObject().put("name", name).put("activate", true).put("config", config)) }
     suspend fun saveType(id: String, name: String, keywords: List<String>) {
         api.call("/v1/event-types/$id", "PUT", JSONObject().put("id", id).put("name", name).put("keywords", JSONArray(keywords)))
@@ -75,7 +129,7 @@ class Repository(private val context: Context, val dao: JournalDao, val prefs: S
     }
     suspend fun deleteSession(id: String) {
         require(RecordingBus.state.value.sessionId != id || !RecordingBus.state.value.recording) { "Stop this recording first" }
-        if (prefs.token.isNotBlank()) {
+        if (prefs.token.isNotBlank() && prefs.operationMode != "standalone") {
             try { 
                 api.call("/v1/sessions/$id", "DELETE") 
             } catch (e: ApiFailure) { 
@@ -85,6 +139,7 @@ class Repository(private val context: Context, val dao: JournalDao, val prefs: S
             }
         }
         local.remove(id)
-        dao.clearCache()
+        dao.deleteSessionCache(id)
+        dao.deleteLocal(id)
     }
 }

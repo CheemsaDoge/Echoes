@@ -34,6 +34,10 @@ class Repository(private val context: Context, val dao: JournalDao, val prefs: S
         }
     }
     suspend fun refresh(day: LocalDate) = syncMutex.withLock {
+        if (prefs.operationMode == "standalone" || prefs.token.isBlank()) {
+            message.value = ""
+            return@withLock
+        }
         val zone = ZoneId.systemDefault()
         val from = day.atStartOfDay(zone).toInstant().toEpochMilli()
         val to = day.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()

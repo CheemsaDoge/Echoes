@@ -148,11 +148,7 @@ class VertexAiClient(
             val rawText = rawTextBuilder.toString().trim()
             if (rawText.isBlank()) return emptyList()
 
-            val cleanJson = if (rawText.startsWith("```")) {
-                rawText.replace(Regex("^```(?:json)?\\s*"), "").replace(Regex("\\s*```$"), "").trim()
-            } else {
-                rawText
-            }
+            val cleanJson = extractJson(rawText)
 
             val parsedJson = JSONObject(cleanJson)
             val rawSegments = parsedJson.optJSONArray("segments") ?: return emptyList()
@@ -168,6 +164,21 @@ class VertexAiClient(
                 }
             }
             return result
+        }
+
+        internal fun extractJson(rawText: String): String {
+            val trimmed = rawText.trim()
+            val jsonFenceRegex = Regex("""```\s*(?:json)?\s*([\s\S]*?\{[\s\S]*?\})\s*```""", RegexOption.IGNORE_CASE)
+            val match = jsonFenceRegex.find(trimmed)
+                ?: Regex("""```\s*(?:json)?\s*([\s\S]*?)\s*```""", RegexOption.IGNORE_CASE).find(trimmed)
+            val candidate = match?.groupValues?.get(1)?.trim() ?: trimmed
+            val firstBrace = candidate.indexOf('{')
+            val lastBrace = candidate.lastIndexOf('}')
+            return if (firstBrace != -1 && lastBrace > firstBrace) {
+                candidate.substring(firstBrace, lastBrace + 1).trim()
+            } else {
+                candidate
+            }
         }
     }
 

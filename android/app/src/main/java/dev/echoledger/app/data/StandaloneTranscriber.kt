@@ -131,8 +131,8 @@ class StandaloneTranscriber(
             .put("end_ms", eventEndMs)
             .put("title", title)
             .put("summary", fullText)
-            .put("type_id", "journal")
-            .put("color", "#61BBA6")
+            .put("type_id", "unknown")
+            .put("color", "#718094")
             .put("is_demo", 0)
             .put("speaker_names", speakerNamesArray)
             .put("unassigned_labels", distinctSpeakers.size)
@@ -181,6 +181,18 @@ class StandaloneTranscriber(
                     payload = speakerPayload.toString()
                 )
             )
+        }
+
+        val defaultTypes = listOf(
+            Triple("unknown", "Uncategorized", "#718094"),
+            Triple("study", "Study", "#9ABD55"),
+            Triple("meeting", "Meeting", "#76A9DC"),
+            Triple("meal", "Meal", "#C5A767"),
+            Triple("social", "Social", "#61BBA6"),
+        )
+        for ((tid, tname, tcolor) in defaultTypes) {
+            val typePayload = JSONObject().put("id", tid).put("name", tname).put("color", tcolor)
+            entriesToSave.add(CacheEntry("types", tid, 0, 0, typePayload.toString()))
         }
 
         dao.putCache(entriesToSave)

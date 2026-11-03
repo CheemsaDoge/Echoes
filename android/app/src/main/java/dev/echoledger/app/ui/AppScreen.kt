@@ -1202,7 +1202,12 @@ private fun EventDialog(event: JSONObject, people: List<JSONObject>, vm: AppView
                 TextButton(
                     onClick = {
                         vm.act {
-                            vm.repo.api.call("/v1/events/${event.getString("id")}", "PATCH", JSONObject().put("title", rename))
+                            if (vm.repo.prefs.operationMode == "standalone" || vm.repo.prefs.token.isBlank()) {
+                                vm.repo.updateEventTitleLocally(event.getString("id"), rename)
+                            } else {
+                                vm.repo.api.call("/v1/events/${event.getString("id")}", "PATCH", JSONObject().put("title", rename))
+                            }
+                            vm.detail.value = vm.repo.getEvent(event.getString("id"))
                             vm.repo.refresh(vm.day.value)
                         }
                     }

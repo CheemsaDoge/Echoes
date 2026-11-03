@@ -1,11 +1,16 @@
 package dev.echoledger.app
 
 import dev.echoledger.app.data.CacheEntry
+import dev.echoledger.app.data.JournalDao
+import dev.echoledger.app.data.LocalChunk
+import dev.echoledger.app.data.LocalSession
 import dev.echoledger.app.data.SecurePreferences
 import dev.echoledger.app.data.StandaloneTranscriber
 import dev.echoledger.app.network.AsrSegment
 import dev.echoledger.app.network.VertexAiClient
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
@@ -96,11 +101,9 @@ class StandaloneAiStressTest {
               }]
             }
         """.trimIndent()
-        try {
-            VertexAiClient.parseResponse(uppercaseFence)
-        } catch (e: JSONException) {
-            println("EMPIRICAL CONFIRMED: uppercase ```JSON triggers JSONException: ${e.message}")
-        }
+        val upperRes = VertexAiClient.parseResponse(uppercaseFence)
+        assertEquals(1, upperRes.size)
+        assertEquals("大写栅栏", upperRes[0].text)
 
         // Preamble before fence: "Here is the transcription:\n```json ... ```"
         val preambleFence = """
@@ -113,11 +116,9 @@ class StandaloneAiStressTest {
               }]
             }
         """.trimIndent()
-        try {
-            VertexAiClient.parseResponse(preambleFence)
-        } catch (e: JSONException) {
-            println("EMPIRICAL CONFIRMED: preamble text before markdown fence triggers JSONException: ${e.message}")
-        }
+        val preambleRes = VertexAiClient.parseResponse(preambleFence)
+        assertEquals(1, preambleRes.size)
+        assertEquals("前缀文本", preambleRes[0].text)
 
         // Postamble after fence: "```json ... ```\nHope this helps!"
         val postambleFence = """
@@ -130,11 +131,9 @@ class StandaloneAiStressTest {
               }]
             }
         """.trimIndent()
-        try {
-            VertexAiClient.parseResponse(postambleFence)
-        } catch (e: JSONException) {
-            println("EMPIRICAL CONFIRMED: postamble text after markdown fence triggers JSONException: ${e.message}")
-        }
+        val postambleRes = VertexAiClient.parseResponse(postambleFence)
+        assertEquals(1, postambleRes.size)
+        assertEquals("后缀文本", postambleRes[0].text)
     }
 
     @Test
@@ -518,8 +517,8 @@ class StandaloneAiStressTest {
             .put("end_ms", startUtcMs + segments.last().end_ms)
             .put("title", fullText.take(57))
             .put("summary", fullText)
-            .put("type_id", "journal")
-            .put("color", "#61BBA6")
+            .put("type_id", "unknown")
+            .put("color", "#718094")
             .put("is_demo", 0)
             .put("speaker_names", speakerNamesArray)
             .put("unassigned_labels", distinctSpeakers.size)
@@ -535,8 +534,8 @@ class StandaloneAiStressTest {
         assertTrue("start_ms must be valid long", parsedEvent.getLong("start_ms") > 0)
         assertTrue("end_ms must be valid long", parsedEvent.getLong("end_ms") > parsedEvent.getLong("start_ms"))
         assertNotNull(parsedEvent.getString("title"))
-        assertEquals("journal", parsedEvent.optString("type_id"))
-        assertEquals("#61BBA6", parsedEvent.optString("color"))
+        assertEquals("unknown", parsedEvent.optString("type_id"))
+        assertEquals("#718094", parsedEvent.optString("color"))
         assertEquals(0, parsedEvent.optInt("is_demo"))
         assertEquals(2, parsedEvent.getJSONArray("speaker_names").length())
         assertEquals(2, parsedEvent.getInt("unassigned_labels"))
@@ -578,5 +577,81 @@ class StandaloneAiStressTest {
         val parsedSpeaker = JSONObject(speakerPayload.toString())
         assertEquals("0", parsedSpeaker.getString("id"))
         assertEquals("Speaker 0", parsedSpeaker.getString("name"))
+    }
+
+    @Test
+    fun testRepositoryRefreshStandaloneAndBlankTokenSafe() = runBlocking {
+        val fakePrefs = FakeSharedPreferences()
+        val securePrefs = SecurePreferences(fakePrefs) { testAesKey }
+        securePrefs.operationMode = "standalone"
+        securePrefs.token = ""
+        securePrefs.baseUrl = "http://127.0.0.1:8000"
+
+        val dao = object : JournalDao() {
+            val cache = mutableMapOf<Pair<String, String>, CacheEntry>()
+            override suspend fun putCache(entries: List<CacheEntry>) {
+                for (e in entries) cache[e.kind to e.id] = e
+            }
+            override suspend fun getCacheEntry(kind: String, id: String): CacheEntry? = cache[kind to id]
+            override suspend fun deleteCacheEntry(kind: String, id: String) { cache.remove(kind to id) }
+            override suspend fun addSession(session: LocalSession) {}
+            override suspend fun addChunk(chunk: LocalChunk) {}
+            override suspend fun session(id: String): LocalSession? = null
+            override suspend fun sessions(): List<LocalSession> = emptyList()
+            override fun observeSessions(): Flow<List<LocalSession>> = emptyFlow()
+            override suspend fun finishSession(id: String, seq: Int, state: String) {}
+            override suspend fun markCreated(id: String) {}
+            override suspend fun markClosed(id: String) {}
+            override suspend fun tombstone(id: String) {}
+            override suspend fun chunk(id: String): LocalChunk? = null
+            override suspend fun chunks(id: String): List<LocalChunk> = emptyList()
+            override fun observeAllChunks(): Flow<List<LocalChunk>> = emptyFlow()
+            override suspend fun pending(id: String): List<LocalChunk> = emptyList()
+            override suspend fun latestCalibration(): LocalChunk? = null
+            override fun pendingCount(): Flow<Int> = emptyFlow()
+            override suspend fun markUpload(id: String, state: String, error: String) {}
+            override suspend fun resetSessionsRemote() {}
+            override suspend fun resetChunksRemote() {}
+            override fun observe(kind: String): Flow<List<CacheEntry>> = emptyFlow()
+            override suspend fun clearKind(kind: String) { cache.keys.removeAll { it.first == kind } }
+            override suspend fun clearEventsRange(from: Long, to: Long) {}
+            override suspend fun deleteSessionCache(sessionId: String) {}
+            override suspend fun clearCache() { cache.clear() }
+            override suspend fun deleteChunks(id: String) {}
+            override suspend fun deleteSession(id: String) {}
+        }
+
+        val tempDir = java.io.File(System.getProperty("java.io.tmpdir"), "test_context_${System.currentTimeMillis()}").apply { mkdirs() }
+        val context = object : android.content.ContextWrapper(null) {
+            override fun getFilesDir(): java.io.File = tempDir
+        }
+        val localStore = dev.echoledger.app.data.LocalStore(context, dao)
+
+        val repo = dev.echoledger.app.data.Repository(context, dao, securePrefs, localStore)
+
+        // 1. refresh() in standalone mode must NOT throw IllegalStateException or IllegalArgumentException
+        repo.refresh(java.time.LocalDate.now())
+        assertEquals("", repo.message.value)
+
+        // 2. refresh() with blank token and server mode must also return safely without throwing
+        securePrefs.operationMode = "server"
+        securePrefs.token = ""
+        repo.refresh(java.time.LocalDate.now())
+        assertEquals("", repo.message.value)
+
+        // 3. updateEventTitleLocally updates the cache entry title and timestamp
+        val initialEvent = JSONObject()
+            .put("id", "chunk_evt_101")
+            .put("title", "Old Title")
+            .put("type_id", "unknown")
+            .put("start_ms", 1000L)
+            .put("end_ms", 2000L)
+        dao.putCache(listOf(CacheEntry("events", "chunk_evt_101", 1000L, 2000L, initialEvent.toString())))
+
+        repo.updateEventTitleLocally("chunk_evt_101", "New Title Saved Locally")
+
+        val updated = repo.getEvent("chunk_evt_101")
+        assertEquals("New Title Saved Locally", updated.getString("title"))
+        assertTrue("updated_ms must be positive", updated.optLong("updated_ms", 0L) > 0L)
     }
 }

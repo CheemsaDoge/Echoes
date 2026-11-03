@@ -172,4 +172,23 @@ class VertexAiClientTest {
         """.trimIndent()
         VertexAiClient.parseResponse(blockedJson)
     }
+
+    @Test
+    fun testExtractJsonVariations() {
+        // Uppercase fence
+        val upper = "```JSON\n{\"segments\": []}\n```"
+        assertEquals("{\"segments\": []}", VertexAiClient.extractJson(upper))
+
+        // Preamble + lowercase fence + postamble
+        val preambleAndPostamble = "Here is the result:\n```json\n{\"segments\": [{\"text\": \"hello\"}]}\n```\nHope it helps!"
+        assertEquals("{\"segments\": [{\"text\": \"hello\"}]}", VertexAiClient.extractJson(preambleAndPostamble))
+
+        // No fence, embedded in explanation
+        val noFence = "Sure thing! {\"segments\": []} is the answer."
+        assertEquals("{\"segments\": []}", VertexAiClient.extractJson(noFence))
+
+        // Pure JSON
+        val pure = "{\"segments\": []}"
+        assertEquals("{\"segments\": []}", VertexAiClient.extractJson(pure))
+    }
 }

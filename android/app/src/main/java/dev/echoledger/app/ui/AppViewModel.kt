@@ -365,11 +365,37 @@ class AppViewModel @JvmOverloads constructor(
         }
     }
 
+    private fun isCachedApkValid(release: UpdateRelease): Boolean {
+        if (!updateDownloader.isApkDownloaded(release.versionName)) return false
+        val file = updateDownloader.getApkFile(release.versionName)
+        if (release.apkAsset.sizeBytes > 0L && file.length() != release.apkAsset.sizeBytes) {
+            return false
+        }
+        if (!release.apkAsset.sha256.isNullOrBlank()) {
+            val fileHash = runCatching {
+                val digest = java.security.MessageDigest.getInstance("SHA-256")
+                file.inputStream().use { input ->
+                    val buffer = ByteArray(8192)
+                    while (true) {
+                        val read = input.read(buffer)
+                        if (read == -1) break
+                        digest.update(buffer, 0, read)
+                    }
+                }
+                digest.digest().joinToString("") { "%02x".format(it) }
+            }.getOrNull()
+            if (!fileHash.equals(release.apkAsset.sha256.trim(), ignoreCase = true)) {
+                return false
+            }
+        }
+        return true
+    }
+
     fun startDownload(release: UpdateRelease): Job {
         activeRelease = release
         downloadJob?.cancel()
 
-        if (updateDownloader.isApkDownloaded(release.versionName)) {
+        if (isCachedApkValid(release)) {
             val apkFile = updateDownloader.getApkFile(release.versionName)
             _updateState.value = UpdateState.ReadyToInstall(apkFile, release)
             return CompletableDeferred(Unit)

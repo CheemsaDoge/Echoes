@@ -1404,14 +1404,27 @@ private fun AboutAndUpdateCard(vm: AppViewModel) {
                                 modifier = Modifier.weight(1f)
                             )
                         }
-                        if (state.canRetry) {
-                            OutlinedButton(
-                                onClick = { vm.checkForUpdates() },
-                                shape = RoundedCornerShape(10.dp),
-                                modifier = Modifier.align(Alignment.End),
-                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
-                            ) {
-                                Text("重试", fontSize = 12.sp)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            if (state.canRetry) {
+                                OutlinedButton(
+                                    onClick = { vm.checkForUpdates() },
+                                    shape = RoundedCornerShape(10.dp),
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                                ) {
+                                    Text("重试", fontSize = 12.sp)
+                                }
+                            } else {
+                                OutlinedButton(
+                                    onClick = { vm.checkForUpdates() },
+                                    shape = RoundedCornerShape(10.dp),
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                                ) {
+                                    Text("重新检查", fontSize = 12.sp)
+                                }
                             }
                         }
                     }

@@ -301,6 +301,7 @@ class AppViewModelUpdateTest {
 
     @Test
     fun testStartDownloadWhenAlreadyDownloadedDirectlyReadyToInstall() = runTest {
+        val fakeApk = ByteArray(100) { 0x42.toByte() }
         val release = UpdateRelease(
             versionName = "v0.9.0",
             semVer = SemVer.parse("0.9.0")!!,
@@ -311,14 +312,14 @@ class AppViewModelUpdateTest {
                 name = "app-release.apk",
                 sizeBytes = 100L,
                 downloadUrl = "https://example.com/download/app-release.apk",
-                sha256 = null
+                sha256 = computeSha256(fakeApk)
             )
         )
 
         val downloader = UpdateDownloader(tempDir)
         val apkFile = downloader.getApkFile(release.versionName)
         apkFile.parentFile?.mkdirs()
-        apkFile.writeText("pre-existing-apk-content")
+        apkFile.writeBytes(fakeApk)
 
         val vm = AppViewModel(
             application = app,
@@ -332,6 +333,56 @@ class AppViewModelUpdateTest {
         val state = vm.updateState.value
         assertTrue("State must be ReadyToInstall, but was $state", state is UpdateState.ReadyToInstall)
         assertEquals(release, (state as UpdateState.ReadyToInstall).release)
+    }
+
+    @Test
+    fun testStartDownloadWhenCachedApkMismatchesProceedsWithDownload() = runTest {
+        val genuineApk = "genuine-new-apk-bytes".toByteArray()
+        val genuineSha = computeSha256(genuineApk)
+
+        val release = UpdateRelease(
+            versionName = "v0.9.1",
+            semVer = SemVer.parse("0.9.1")!!,
+            title = "EchoLedger 0.9.1",
+            changelog = "Test changelog",
+            publishedAt = "2026-11-03T12:00:00Z",
+            apkAsset = ApkAsset(
+                name = "app-release.apk",
+                sizeBytes = genuineApk.size.toLong(),
+                downloadUrl = "https://example.com/download/app-release.apk",
+                sha256 = genuineSha
+            )
+        )
+
+        // Pre-create corrupt/stale cached file
+        val downloader = UpdateDownloader(tempDir, createMockClient { req ->
+            Response.Builder()
+                .request(req)
+                .protocol(Protocol.HTTP_1_1)
+                .code(200)
+                .message("OK")
+                .body(genuineApk.toResponseBody("application/vnd.android.package-archive".toMediaType()))
+                .build()
+        })
+        val staleFile = downloader.getApkFile(release.versionName)
+        staleFile.parentFile?.mkdirs()
+        staleFile.writeText("corrupt stale old apk file")
+
+        val vm = AppViewModel(
+            application = app,
+            repository = repo,
+            updateDownloader = downloader
+        )
+
+        val job = vm.startDownload(release)
+        testDispatcher.scheduler.advanceUntilIdle()
+        job.join()
+
+        val state = vm.updateState.value
+        assertTrue("State must be ReadyToInstall after re-download, but was $state", state is UpdateState.ReadyToInstall)
+        val ready = state as UpdateState.ReadyToInstall
+        assertEquals(release, ready.release)
+        assertArrayEquals(genuineApk, ready.apkFile.readBytes())
     }
 
     @Test

@@ -144,6 +144,8 @@ def test_vertexai_api_key_transcribe():
         assert request.headers["x-goog-api-key"] == "my-api-key"
         body = json.loads(request.content)
         assert "contents" in body
+        assert "safetySettings" in body
+        assert any(s.get("category") == "HARM_CATEGORY_HARASSMENT" and s.get("threshold") == "BLOCK_NONE" for s in body["safetySettings"])
         assert body["generationConfig"]["audioTimestamp"] is True
         return httpx.Response(200, json=vertex_example_response("Test audio speech"))
 

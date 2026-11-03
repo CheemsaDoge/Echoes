@@ -17,28 +17,31 @@ import javax.crypto.spec.SecretKeySpec
  * Secure preferences storing backend connection tokens and cloud AI provider keys.
  * Sensitive keys are encrypted using AndroidKeyStore AES-256-GCM.
  */
-class SecurePreferences(private val prefs: SharedPreferences) {
-    constructor(context: Context) : this(context.getSharedPreferences("connection", Context.MODE_PRIVATE))
+class SecurePreferences(
+    private val prefs: SharedPreferences,
+    private val keyProvider: ((alias: String) -> SecretKey)? = null
+) {
+    constructor(context: Context) : this(
+        context.getSharedPreferences("connection", Context.MODE_PRIVATE),
+        null
+    )
     private val tokenAlias = "echoledger_backend_token_v1"
     private val aiKeyAlias = "echoledger_ai_api_key_v1"
 
     private fun getSecretKey(alias: String): SecretKey {
-        return try {
-            val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-            (store.getKey(alias, null) as? SecretKey)?.let { return it }
-            val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
-            generator.init(
-                KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
-                    .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                    .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                    .build()
-            )
-            generator.generateKey()
-        } catch (_: Exception) {
-            // Fallback for JVM unit tests where AndroidKeyStore provider is absent
-            val raw = ("echoledger_secret_key_" + alias).toByteArray(Charsets.UTF_8).copyOf(32)
-            SecretKeySpec(raw, "AES")
+        if (keyProvider != null) {
+            return keyProvider.invoke(alias)
         }
+        val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        (store.getKey(alias, null) as? SecretKey)?.let { return it }
+        val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
+        generator.init(
+            KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .build()
+        )
+        return generator.generateKey()
     }
 
     private fun decryptString(prefKey: String, alias: String): String {

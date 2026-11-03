@@ -62,7 +62,8 @@ class VertexAiClient(
 
         fun buildRequestBody(
             audioBase64: String,
-            prompt: String = DEFAULT_PROMPT
+            prompt: String = DEFAULT_PROMPT,
+            includeAudioTimestamp: Boolean = false
         ): JSONObject {
             val inlineData = JSONObject()
                 .put("mimeType", "audio/wav")
@@ -107,9 +108,12 @@ class VertexAiClient(
 
             val generationConfig = JSONObject()
                 .put("temperature", 0.0)
-                .put("audioTimestamp", true)
                 .put("responseMimeType", "application/json")
                 .put("responseSchema", responseSchema)
+
+            if (includeAudioTimestamp) {
+                generationConfig.put("audioTimestamp", true)
+            }
 
             return JSONObject()
                 .put("contents", contents)
@@ -178,7 +182,8 @@ class VertexAiClient(
     ): List<AsrSegment> = withContext(Dispatchers.IO) {
         val audioBase64 = Base64.getEncoder().encodeToString(wavBytes)
         val endpoint = resolveEndpoint(provider, model, apiKey, projectId, location, endpointOverride)
-        val bodyJson = buildRequestBody(audioBase64)
+        val isVertex = provider == "vertex_ai"
+        val bodyJson = buildRequestBody(audioBase64, DEFAULT_PROMPT, includeAudioTimestamp = isVertex)
 
         val requestBuilder = Request.Builder()
             .url(endpoint)

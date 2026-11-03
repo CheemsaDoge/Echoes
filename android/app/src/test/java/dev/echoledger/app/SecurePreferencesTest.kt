@@ -44,10 +44,13 @@ class FakeSharedPreferences : SharedPreferences {
 }
 
 class SecurePreferencesTest {
+    private val testKey = javax.crypto.spec.SecretKeySpec("test_aes_key_32_bytes_long_1234".toByteArray(Charsets.UTF_8).copyOf(32), "AES")
+    private fun createPrefs(fake: FakeSharedPreferences) = SecurePreferences(fake) { testKey }
+
     @Test
     fun testKeyStoreEncryptionRoundTrip() {
         val fakePrefs = FakeSharedPreferences()
-        val securePrefs = SecurePreferences(fakePrefs)
+        val securePrefs = createPrefs(fakePrefs)
 
         val secretKey = "AIzaSy_Secret_Gemini_Key_987654321"
         securePrefs.aiApiKey = secretKey
@@ -65,7 +68,7 @@ class SecurePreferencesTest {
     @Test
     fun testEmptyKeyClearsPreference() {
         val fakePrefs = FakeSharedPreferences()
-        val securePrefs = SecurePreferences(fakePrefs)
+        val securePrefs = createPrefs(fakePrefs)
 
         securePrefs.aiApiKey = "temp_key"
         assertEquals("temp_key", securePrefs.aiApiKey)
@@ -78,7 +81,7 @@ class SecurePreferencesTest {
     @Test
     fun testOperationModePersistence() {
         val fakePrefs = FakeSharedPreferences()
-        val securePrefs = SecurePreferences(fakePrefs)
+        val securePrefs = createPrefs(fakePrefs)
 
         // Default value
         assertEquals("standalone", securePrefs.operationMode)
@@ -93,7 +96,7 @@ class SecurePreferencesTest {
     @Test
     fun testAiModelAndProviderDefaults() {
         val fakePrefs = FakeSharedPreferences()
-        val securePrefs = SecurePreferences(fakePrefs)
+        val securePrefs = createPrefs(fakePrefs)
 
         assertEquals("gemini_studio", securePrefs.aiProvider)
         assertEquals("gemini-2.0-flash", securePrefs.aiModelName)

@@ -88,6 +88,11 @@ class VertexAiClientTest {
         assertEquals(0.0, genConfig.getDouble("temperature"), 0.001)
         assertEquals("application/json", genConfig.getString("responseMimeType"))
         assertTrue(genConfig.has("responseSchema"))
+        assertFalse("Gemini Studio must omit audioTimestamp to prevent HTTP 400", genConfig.has("audioTimestamp"))
+
+        // Vertex AI includeAudioTimestamp
+        val vertexBody = VertexAiClient.buildRequestBody(dummyAudioB64, includeAudioTimestamp = true)
+        assertTrue(vertexBody.getJSONObject("generationConfig").getBoolean("audioTimestamp"))
     }
 
     @Test

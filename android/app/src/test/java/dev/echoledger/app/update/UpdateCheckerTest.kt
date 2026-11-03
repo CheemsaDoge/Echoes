@@ -315,6 +315,58 @@ class UpdateCheckerTest {
     }
 
     @Test
+    fun testCollectiveChecksumsFileExtractsTargetApkWithNormalizedPath() = runTest {
+        val debugHash = "1111111111111111111111111111111111111111111111111111111111111111"
+        val releaseHash = "2222222222222222222222222222222222222222222222222222222222222222"
+        val releaseJson = """
+            {
+              "tag_name": "v0.6.0",
+              "name": "EchoLedger v0.6.0",
+              "body": "",
+              "assets": [
+                {
+                  "name": "sha256sums.txt",
+                  "browser_download_url": "https://example.com/sha256sums.txt"
+                },
+                {
+                  "name": "app-debug.apk",
+                  "size": 18000000,
+                  "browser_download_url": "https://example.com/app-debug.apk"
+                },
+                {
+                  "name": "app-release.apk",
+                  "size": 16000000,
+                  "browser_download_url": "https://example.com/app-release.apk"
+                }
+              ]
+            }
+        """.trimIndent()
+
+        val checksumsFileContent = """
+            # Generated checksums
+            $debugHash  ./build/outputs/apk/debug/app-debug.apk
+            $releaseHash  *./build/outputs/apk/release/app-release.apk
+        """.trimIndent()
+
+        val client = createMockClient { req ->
+            val url = req.url.toString()
+            if (url.endsWith("sha256sums.txt")) {
+                mockResponse(req, 200, checksumsFileContent)
+            } else {
+                mockResponse(req, 200, releaseJson)
+            }
+        }
+
+        val checker = UpdateChecker(client = client, currentVersion = "0.1.0")
+        val result = checker.checkForUpdate()
+
+        assertTrue(result is UpdateResult.Available)
+        val available = result as UpdateResult.Available
+        assertEquals("app-release.apk", available.release.apkAsset.name)
+        assertEquals(releaseHash, available.release.apkAsset.sha256)
+    }
+
+    @Test
     fun testFallbackToReleasesListWhenLatestReturns404() = runTest {
         val releasesListJson = """
             [

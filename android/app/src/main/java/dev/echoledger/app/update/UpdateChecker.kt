@@ -223,7 +223,7 @@ class UpdateChecker(
                 ) {
                     val shaUrl = asset.optString("browser_download_url")
                     if (shaUrl.isNotEmpty()) {
-                        val downloadedSha = tryFetchCompanionSha(shaUrl, apkAssetName)
+                        val downloadedSha = tryFetchCompanionSha(shaUrl, apkAssetName, requireFilenameMatch = true)
                         if (downloadedSha != null) {
                             return downloadedSha
                         }
@@ -242,7 +242,7 @@ class UpdateChecker(
                     if (name.endsWith(".sha256", ignoreCase = true)) {
                         val shaUrl = asset.optString("browser_download_url")
                         if (shaUrl.isNotEmpty()) {
-                            val downloadedSha = tryFetchCompanionSha(shaUrl, apkAssetName)
+                            val downloadedSha = tryFetchCompanionSha(shaUrl, apkAssetName, requireFilenameMatch = false)
                             if (downloadedSha != null) {
                                 return downloadedSha
                             }
@@ -271,7 +271,11 @@ class UpdateChecker(
         return null
     }
 
-    private fun tryFetchCompanionSha(url: String, targetApkName: String): String? {
+    private fun tryFetchCompanionSha(
+        url: String,
+        targetApkName: String,
+        requireFilenameMatch: Boolean = false
+    ): String? {
         return try {
             val request = Request.Builder()
                 .url(url)
@@ -280,12 +284,24 @@ class UpdateChecker(
             client.newCall(request).execute().use { resp ->
                 if (resp.isSuccessful) {
                     val text = resp.body?.string().orEmpty()
-                    val specificMatch = Regex("""\b([a-fA-F0-9]{64})\s+[*]?${Regex.escape(targetApkName)}\b""").find(text)
-                    if (specificMatch != null) {
-                        return specificMatch.groupValues[1].lowercase()
+                    for (line in text.lines()) {
+                        val trimmedLine = line.trim()
+                        if (trimmedLine.isEmpty() || trimmedLine.startsWith("#")) continue
+                        val hashMatch = Regex("""\b([a-fA-F0-9]{64})\b""").find(trimmedLine) ?: continue
+                        val hash = hashMatch.groupValues[1].lowercase()
+                        val rest = trimmedLine.replace(hashMatch.value, "").trim().removePrefix("*").trim()
+                        val fileName = rest.substringAfterLast('/').substringAfterLast('\\').trim()
+                        if (fileName.equals(targetApkName, ignoreCase = true)) {
+                            return hash
+                        }
                     }
-                    val genericMatch = Regex("""\b([a-fA-F0-9]{64})\b""").find(text)
-                    genericMatch?.groupValues?.get(1)?.lowercase()
+
+                    if (!requireFilenameMatch) {
+                        val genericMatch = Regex("""\b([a-fA-F0-9]{64})\b""").find(text)
+                        genericMatch?.groupValues?.get(1)?.lowercase()
+                    } else {
+                        null
+                    }
                 } else null
             }
         } catch (_: Exception) {

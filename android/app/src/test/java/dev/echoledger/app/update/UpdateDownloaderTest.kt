@@ -306,4 +306,27 @@ class UpdateDownloaderTest {
         assertFalse("Interrupted download must NOT leave a published destination file", destFile.exists())
         assertFalse("isApkDownloaded must return false", downloader.isApkDownloaded("0.9.1"))
     }
+
+    @Test
+    fun testDestinationFileNeverPublishedWhenPublishFails() = runTest {
+        val downloadDir = tempFolder.newFolder("updates")
+        val payload = "Small test payload".toByteArray()
+        val client = createMockClient { req ->
+            mockStreamResponse(req, payload)
+        }
+
+        val downloader = UpdateDownloader(downloadDir = downloadDir, client = client)
+        val apkAsset = ApkAsset("EchoLedger.apk", payload.size.toLong(), "https://example.com/small.apk")
+
+        val blockedFile = downloader.getApkFile("0.9.2")
+        blockedFile.mkdirs()
+        File(blockedFile, "sub").createNewFile()
+
+        try {
+            downloader.download(apkAsset, "0.9.2").collect()
+            fail("Must throw exception because destination cannot be published")
+        } catch (_: Exception) {}
+
+        assertFalse("isApkDownloaded must return false", downloader.isApkDownloaded("0.9.2"))
+    }
 }

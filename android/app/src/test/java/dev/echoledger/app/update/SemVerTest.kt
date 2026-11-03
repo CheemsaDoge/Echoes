@@ -102,6 +102,11 @@ class SemVerTest {
         assertTrue("1.0.0-alpha must be less than 1.0.0-alpha.1", v100Alpha < alpha1)
         assertTrue("1.0.0-alpha.1 must be less than 1.0.0-alpha.beta", alpha1 < alphaBeta)
 
+        // Hyphenated non-numeric identifiers must use ASCII ordering (1.0.0--1 < 1.0.0--2)
+        val hyphen1 = SemVer.parse("1.0.0--1")!!
+        val hyphen2 = SemVer.parse("1.0.0--2")!!
+        assertTrue("1.0.0--1 must precede 1.0.0--2 in ASCII order", hyphen1 < hyphen2)
+
         // Equality comparison
         val v010Duplicate = SemVer.parse("0.1.0")!!
         assertEquals(0, v010.compareTo(v010Duplicate))

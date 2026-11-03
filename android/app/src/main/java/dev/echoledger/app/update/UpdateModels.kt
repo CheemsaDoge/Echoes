@@ -34,13 +34,13 @@ data class SemVer(
             val p2 = parts2[i]
             if (p1 == p2) continue
 
-            val num1 = p1.toIntOrNull()
-            val num2 = p2.toIntOrNull()
+            val isDigits1 = p1.isNotEmpty() && p1.all { it.isDigit() }
+            val isDigits2 = p2.isNotEmpty() && p2.all { it.isDigit() }
 
             return when {
-                num1 != null && num2 != null -> num1.compareTo(num2)
-                num1 != null && num2 == null -> -1
-                num1 == null && num2 != null -> 1
+                isDigits1 && isDigits2 -> java.math.BigInteger(p1).compareTo(java.math.BigInteger(p2))
+                isDigits1 && !isDigits2 -> -1
+                !isDigits1 && isDigits2 -> 1
                 else -> p1.compareTo(p2)
             }
         }

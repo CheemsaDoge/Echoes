@@ -30,7 +30,7 @@ class UpdateDownloader(
 
     fun isApkDownloaded(version: String): Boolean {
         val file = getApkFile(version)
-        return file.exists() && file.length() > 0
+        return file.isFile && file.length() > 0
     }
 
     fun clearUpdates(): Boolean {
@@ -130,12 +130,19 @@ class UpdateDownloader(
                     }
 
                     // Publish atomically only after full verification
-                    if (destinationFile.exists()) {
+                    var published = false
+                    try {
+                        if (destinationFile.exists()) {
+                            destinationFile.delete()
+                        }
+                        if (!tempFile.renameTo(destinationFile)) {
+                            tempFile.copyTo(destinationFile, overwrite = true)
+                            tempFile.delete()
+                        }
+                        published = true
+                    } catch (e: Throwable) {
                         destinationFile.delete()
-                    }
-                    if (!tempFile.renameTo(destinationFile)) {
-                        tempFile.copyTo(destinationFile, overwrite = true)
-                        tempFile.delete()
+                        throw e
                     }
 
                     if (lastPercent < 100 && totalBytes > 0) {
@@ -144,6 +151,7 @@ class UpdateDownloader(
                 }
             } catch (e: Throwable) {
                 tempFile.delete()
+                destinationFile.delete()
                 throw e
             } finally {
                 watcher.cancel()

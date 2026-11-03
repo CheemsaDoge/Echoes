@@ -30,7 +30,8 @@ class AppViewModel @JvmOverloads constructor(
     repository: Repository? = null,
     val updateChecker: UpdateChecker = UpdateChecker(),
     val updateDownloader: UpdateDownloader = UpdateDownloader(application),
-    val updateInstaller: UpdateInstaller = UpdateInstaller
+    val updateInstaller: UpdateInstaller = UpdateInstaller,
+    val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
 ) : AndroidViewModel(application) {
     val graph = (application as? EchoApp)?.graph
     val repo = repository ?: graph?.repository ?: error("EchoApp graph or repository required")
@@ -365,11 +366,11 @@ class AppViewModel @JvmOverloads constructor(
         }
     }
 
-    private fun isCachedApkValid(release: UpdateRelease): Boolean {
-        if (!updateDownloader.isApkDownloaded(release.versionName)) return false
+    private suspend fun isCachedApkValid(release: UpdateRelease): Boolean = withContext(ioDispatcher) {
+        if (!updateDownloader.isApkDownloaded(release.versionName)) return@withContext false
         val file = updateDownloader.getApkFile(release.versionName)
         if (release.apkAsset.sizeBytes > 0L && file.length() != release.apkAsset.sizeBytes) {
-            return false
+            return@withContext false
         }
         if (!release.apkAsset.sha256.isNullOrBlank()) {
             val fileHash = runCatching {
@@ -377,6 +378,7 @@ class AppViewModel @JvmOverloads constructor(
                 file.inputStream().use { input ->
                     val buffer = ByteArray(8192)
                     while (true) {
+                        currentCoroutineContext().ensureActive()
                         val read = input.read(buffer)
                         if (read == -1) break
                         digest.update(buffer, 0, read)
@@ -385,24 +387,24 @@ class AppViewModel @JvmOverloads constructor(
                 digest.digest().joinToString("") { "%02x".format(it) }
             }.getOrNull()
             if (!fileHash.equals(release.apkAsset.sha256.trim(), ignoreCase = true)) {
-                return false
+                return@withContext false
             }
         }
-        return true
+        true
     }
 
     fun startDownload(release: UpdateRelease): Job {
         activeRelease = release
         downloadJob?.cancel()
 
-        if (isCachedApkValid(release)) {
-            val apkFile = updateDownloader.getApkFile(release.versionName)
-            _updateState.value = UpdateState.ReadyToInstall(apkFile, release)
-            return CompletableDeferred(Unit)
-        }
-
         _updateState.value = UpdateState.Downloading(0L, release.apkAsset.sizeBytes, 0)
         val job = viewModelScope.launch {
+            if (isCachedApkValid(release)) {
+                val apkFile = updateDownloader.getApkFile(release.versionName)
+                _updateState.value = UpdateState.ReadyToInstall(apkFile, release)
+                return@launch
+            }
+
             try {
                 updateDownloader.download(release).collect { progress ->
                     _updateState.value = UpdateState.Downloading(

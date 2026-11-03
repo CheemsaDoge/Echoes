@@ -324,11 +324,13 @@ class AppViewModelUpdateTest {
         val vm = AppViewModel(
             application = app,
             repository = repo,
-            updateDownloader = downloader
+            updateDownloader = downloader,
+            ioDispatcher = testDispatcher
         )
 
-        vm.startDownload(release)
+        val job = vm.startDownload(release)
         testDispatcher.scheduler.advanceUntilIdle()
+        job.join()
 
         val state = vm.updateState.value
         assertTrue("State must be ReadyToInstall, but was $state", state is UpdateState.ReadyToInstall)
@@ -371,7 +373,8 @@ class AppViewModelUpdateTest {
         val vm = AppViewModel(
             application = app,
             repository = repo,
-            updateDownloader = downloader
+            updateDownloader = downloader,
+            ioDispatcher = testDispatcher
         )
 
         val job = vm.startDownload(release)
@@ -435,7 +438,8 @@ class AppViewModelUpdateTest {
             application = app,
             repository = repo,
             updateChecker = checker,
-            updateDownloader = downloader
+            updateDownloader = downloader,
+            ioDispatcher = testDispatcher
         )
 
         vm.checkForUpdates().join()

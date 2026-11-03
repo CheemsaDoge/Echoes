@@ -151,3 +151,11 @@ Echoes 移动端独立运行架构将 **Google AI Studio Gemini API** 与 **GCP 
 2. 填写 **GCP Project ID**、**Location**（如 `global` 或 `us-central1`）。
 3. 填入 Vertex AI Express API Key 或自定义中转 Gateway Endpoint。
 4. 测试连接并通过后保存配置。
+
+---
+
+## 5. 验收与更多参考
+完整的移动端独立运行验收步骤、断网离线队列恢复验证、应用内 APK 自动更新机制操作流程，以及自动化测试套件执行指令，请参阅：
+- [用户手册与人工验收指南 (ACCEPTANCE_GUIDE.zh-CN.md)](ACCEPTANCE_GUIDE.zh-CN.md)
+- [开发与部署指南 (DEVELOPMENT.zh-CN.md)](DEVELOPMENT.zh-CN.md)
+

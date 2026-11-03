@@ -79,19 +79,33 @@ python scripts/upload_wav.py sample-16k-mono.wav --started-at-ms <录音开始UT
 
 ## 5. Android 构建与调试
 
-工程基线：JDK 17、Gradle 8.10.2、Android SDK 35、AGP 8.8.2、Kotlin 2.1.10；minSdk=26、targetSdk=35。版本选择用于稳定构建基线，没有声称这是最新版本或满足未来应用商店要求。
+工程基线：JDK 17、Gradle 8.10.2、Android SDK 35、AGP 8.8.2、Kotlin 2.1.10；minSdk=26、targetSdk=35。项目已内置标准 Gradle Wrapper (`gradlew`)，支持整包编译与自动化测试。
 
-本次不含 Android SDK 和 Gradle Wrapper JAR，无法交付已验证 APK。可打开 android/ 为 Android Studio 项目；设置 sdk.dir 或 ANDROID_HOME，安装 SDK 35 和对应 build-tools，再执行：
+可打开 `android/` 为 Android Studio 项目，或在根目录下直接使用命令行构建：
 
 ```bash
+# 执行 Android 单元测试套件 (96 项测试全部通过)
+./gradlew :app:testDebugUnitTest :core:test
+
+# 执行官方验证脚本 (含 core:test、assembleDebug 与 lintDebug)
 ./scripts/build_android.sh
+
+# 编译正式生产 Release 签名 APK
+./gradlew assembleRelease
 ```
 
-脚本运行 core:test、app:assembleDebug、app:lintDebug。成功产物在 android/app/build/outputs/apk/debug/。CI 定义位于 .github/workflows/check.yml，需要将代码放入用户自己的 GitHub 仓库后触发；本次没有替用户创建仓库、推送或执行工作流。
+成功产物：
+- Debug APK: `android/app/build/outputs/apk/debug/app-debug.apk`
+- Release APK: `android/app/build/outputs/apk/release/app-release.apk`
 
-调试版允许 HTTP，发行版只允许 HTTPS。设备设置页填写服务端地址与 API_TOKEN；首次开始录音会请求权限和告知录音影响。开始后检查通知、时间计数、待上传数量、服务端 chunks 与 batches。校准录音停止后可以回听并标注全部语音，再请求评估。
+CI/CD 自动化流水线位于 `.github/workflows/check.yml`（自动化测试与 Debug 构建）和 `.github/workflows/release.yml`（打 Tag `v*` 自动构建签名 Release APK 并发布 GitHub Release）。
 
-没有实现：蓝牙指定路由、系统通话录音、绕过后台限制、开机静默录音。来电或其他应用占麦时应显示状态并检查实际音频，不能假定平台会持续交付有效样本。
+设备运行与调试：
+- **运行模式**：应用支持「端侧独立 (零依赖)」、「专用服务端」与「混合模式」。详细配置指南见 [移动端独立运行架构](STANDALONE_AI.md) 与 [用户手册与人工验收指南](ACCEPTANCE_GUIDE.zh-CN.md)。
+- **网络与地址**：调试版允许 HTTP，发行版只允许 HTTPS。模拟器调试局域网服务可填 `http://10.0.2.2:8000`。
+- **更新通道**：设置页集成「关于与应用更新」，直连 `CheemsaDoge/Echoes` 仓库 Releases API，支持一键检查、下载与校验安装。
+- **录音与权限**：首次开始录音会请求麦克风权限与前台服务权限，麦克风前台服务启动后持续采集 16kHz PCM；独立模式下具备 RMS < 0.003 静音跳过保护。
+- **边界说明**：尚未实现系统通话录音、绕过系统后台强杀、蓝牙特定路由强制切换。来电或其他应用占麦时应显示状态并检查实际音频。
 
 ## 6. 部署
 

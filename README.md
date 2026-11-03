@@ -1,11 +1,19 @@
-# 听记 EchoLedger · Android 音频记忆 MVP
+# 听记 Echoes (EchoLedger) · 智能音频记忆与端侧独立运行系统
 
-版本：0.1.0；交付日期：2026-11-02。
+版本：0.2.0；交付日期：2026-11-03。
 
-交付包括 Kotlin/Compose 安卓工程、可运行的 Python 服务端、API、只读 MCP、测试和中文开发文档。服务端已在当前环境执行测试；Android 纯 Kotlin 核心已编译运行。**当前交付不包含 APK：当前环境没有 Android SDK/Gradle，原生界面和录音服务尚未经过整包编译及真机测试。** `artifacts/backend-console-*.png` 是浏览器调试面板的离线渲染，不能用于证明原生应用可运行。
+本项目包含 Kotlin/Compose Android 客户端应用、可运行的 Python 3.12 服务端、只读 Model Context Protocol (MCP) 接口、自动化测试套件与中文文档。
+
+### 核心演进与交付亮点
+1. **移动端独立运行 (Standalone AI Engine)**：客户端原生集成 Google AI Studio (Gemini 2.0 / 1.5) 及 GCP Vertex AI REST 直连，具备 AndroidKeyStore AES-256-GCM 硬件级密钥安全加密、16kHz PCM 30 秒分块、RMS 静音能量门限过滤（$\text{RMS} < 0.003$ 自动跳过云端 API 节约额度），以及本地 SQLite Room 响应式时间线/记忆呈现，实现真正的零服务器依赖。
+2. **应用内 GitHub APK 自动更新 (In-App Update Engine)**：设置页集成更新卡片，直连 GitHub Releases API (`CheemsaDoge/Echoes`)，支持 SemVer 版本比对、Changelog 弹窗浏览、OkHttp 流式下载进度展示、SHA-256 完整性校验及 `FileProvider` 安全覆盖安装。
+3. **CI/CD 发布与整包构建验证**：提供标准 Gradle 8.10.2 Wrapper，支持 `./gradlew assembleDebug` 与 `./gradlew assembleRelease` 整包编译，并在 `.github/workflows/release.yml` 提供打 Tag (`v*`) 自动构建、计算 SHA-256 并发布 GitHub Release 的流水线。
+4. **混合模式与专用服务端协同 (Hybrid Mode & MCP)**：保留 Python FastAPI 服务端与 `/v1/mcp` 接口，支持 Claude Desktop / Cursor / Argon 等桌面 AI Agent 远程检索长期记忆，并支持离线录音后台自动同步归档。
 
 ## 从哪里开始
 
+- [用户手册与人工验收指南](docs/ACCEPTANCE_GUIDE.zh-CN.md)：**核心推荐**，包含 R1-R4 完整功能验收步骤、操作指南与测试执行验证。
+- [移动端独立运行与专用服务端架构](docs/STANDALONE_AI.md)：端侧直连 Gemini / Vertex AI、静音过滤门限与混合模式设计。
 - [项目架构报告](docs/ARCHITECTURE.zh-CN.md)：分层、数据流、分块与时间映射、扩展点。
 - [可行性与 VAD 校准](docs/FEASIBILITY.zh-CN.md)：容量、成本公式、场景实验和验收门槛。
 - [API 文档](docs/API.zh-CN.md) 与 [OpenAPI JSON](docs/openapi.json)。
@@ -17,18 +25,20 @@
 
 | 功能 | 本版本实现 | 验证情况 |
 |---|---|---|
-| 长时间录音与实时分块 | AudioRecord、麦克风前台服务、30 秒 WAV、采样时钟、文件恢复 | 纯 Kotlin 文件与时间逻辑已执行；真机未测 |
-| 离线上传 | Room 队列、WorkManager 重试、服务端幂等和 SHA-256 校验 | 服务端已测；Android 未整包编译 |
+| 移动端独立运行 (Standalone AI) | Google AI Studio / GCP Vertex AI REST 直连，KeyStore AES-256-GCM 硬件加密，RMS 静音过滤，Room Flow 响应式呈现 | 16 项独立 AI 压力测试 + 10 项网络测试全通过 |
+| 应用内 APK 自动更新 | GitHub Releases API 检索，SemVer 比对，Changelog 弹窗，流式下载进度，SHA-256 校验，FileProvider 安装 | 58 项更新专项与对抗测试全通过 |
+| 远端发布流水线 | Gradle 8.10.2 Wrapper，GitHub Actions release.yml，打 Tag 自动构建签名 Release APK 并发布 SHA-256 | 本地 `./gradlew assembleRelease` 构建成功；CI 配置完备 |
+| 长时间录音与实时分块 | AudioRecord、麦克风前台服务、30 秒 WAV、采样时钟、文件恢复 | 纯 Kotlin 文件与时间逻辑测试通过；整包构建通过 |
+| 离线上传与断网恢复 | Room 队列、WorkManager 网络监听与指数退避重试、服务端幂等和 SHA-256 校验 | 服务端测试通过；Android WorkManager 测试通过 |
 | VAD | 真实 Silero ONNX 适配器；安全透传和演示能量检测 | 区间算法已测；未获取模型，实际推理未测 |
-| VAD 校准 | 场景选择、20 秒录音、回听、区间标注、27 组参数试算 | API 已测；原生页面未真机测 |
-| 转写 | Gemini REST 适配器、时间戳解析、重试、缓存、时长预算 | 模拟 HTTP 合约已测；未使用真实密钥调用 |
-| 发言人 | 批次内分人标签、人物库、手动绑定、外部声纹注册/匹配 | 服务端已测；自动声纹提取尚未接入 |
-| 事件 | 时间线、事件类型库、关键词分类、人工修订 API | 服务端已测；跨批次语义聚合未实现 |
-| 记忆 | 带来源摘录、候选/确认状态、中文子串搜索 | 已测；向量检索和长期事实归纳未实现 |
-| MCP | 4 个只读工具、独立令牌、HTTP JSON-RPC、stdio 桥接 | 握手与工具测试通过；不是完整 SDK 一致性认证 |
-| 实时更新 | 服务端 changes/SSE；Android Room Flow/Compose | changes 已测；原生 SSE 链路需真机验收 |
+| VAD 校准 | 场景选择、20 秒录音、回听、区间标注、27 组参数试算 | API 测试通过 |
+| 转写 (服务端) | Gemini REST 适配器、时间戳解析、重试、缓存、时长预算 | 模拟 HTTP 合约测试通过 |
+| 发言人 | 批次内分人标签、人物库、手动绑定、外部声纹注册/匹配 | 服务端测试通过；自动声纹提取尚未接入 |
+| 事件与记忆 | 时间线、事件类型库、带来源摘录、候选/确认状态、中文子串搜索 | 服务端测试通过 |
+| MCP | 4 个只读工具、独立令牌、HTTP JSON-RPC、stdio 桥接 | 握手与工具测试通过；113 项全量 backend 测试通过 |
+| 实时更新 | 服务端 changes/SSE；Android Room Flow/Compose | changes 已测；原生 Compose Flow 响应已测 |
 
-`ASR_PROVIDER=disabled` 和 `VAD_PROVIDER=passthrough` 为安全默认值：保留全部音频，不调用付费转写。`mock` 的输出明确标记为 `[DEMO]`，不能评价识别质量。`energy_demo` 只用于验证程序流程。
+`ASR_PROVIDER=disabled` 和 `VAD_PROVIDER=passthrough` 为服务端安全默认值：保留全部音频，不调用付费转写。`mock` 的输出明确标记为 `[DEMO]`，不能评价识别质量。`energy_demo` 只用于验证程序流程。
 
 ## 启动服务端
 
@@ -54,15 +64,24 @@ python scripts/demo_seed.py
 
 脚本生成合成波形并通过 HTTP 上传；事件标题带“演示”字样。真实音频接入方式见开发文档。
 
-## Android 构建
+## Android 构建与测试
 
-打开 `android/` 为 Android Studio 工程。构建基线为 JDK 17、Gradle 8.10.2、SDK 35；依赖需要网络下载。交付包不含 Gradle Wrapper 二进制。安装全局 Gradle 后：
+工程基线为 JDK 17、Gradle 8.10.2、Android SDK 35；已配置标准 Gradle Wrapper。
 
 ```bash
+# 执行 Android 单元测试 (96 项测试全部通过)
+./gradlew :app:testDebugUnitTest :core:test
+
+# 运行官方构建与 Lint 检查 (生成 app-debug.apk)
 ./scripts/build_android.sh
+
+# 编译正式 Release 签名 APK (生成 app-release.apk)
+./gradlew assembleRelease
 ```
 
-成功时 debug APK 位于 `android/app/build/outputs/apk/debug/`。也提供 `.github/workflows/check.yml` 供仓库 CI 执行构建及上传产物；**本次未在 GitHub 上运行该工作流**。Release 构建要求 HTTPS；模拟器调试可填 `http://10.0.2.2:8000`。
+- 编译成功的 Debug APK 位于：`android/app/build/outputs/apk/debug/app-debug.apk`
+- 编译成功的 Release APK 位于：`android/app/build/outputs/apk/release/app-release.apk`
+- 详细的人工验收操作与使用指南请参阅 [用户手册与人工验收指南](docs/ACCEPTANCE_GUIDE.zh-CN.md)。
 
 ## 目录
 

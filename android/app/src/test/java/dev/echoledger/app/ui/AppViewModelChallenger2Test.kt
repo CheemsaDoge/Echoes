@@ -46,7 +46,7 @@ class AppViewModelChallenger2Test {
     @Before
     fun setup() {
         Dispatchers.setMain(testDispatcher)
-        tempDir = tempFolder.newFolder("app_cache_challenger2")
+        tempDir = tempFolder.newFolder()
 
         val fakePrefs = FakeSharedPreferences()
         val securePrefs = SecurePreferences(fakePrefs) { testAesKey }

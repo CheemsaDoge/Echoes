@@ -1617,16 +1617,24 @@ private fun StorageAndUpdatePage(
                             }
                         }
                         is UpdateState.Downloading -> {
+                            val safePercent = state.percent.coerceIn(0, 100)
+                            val downloadedMb = state.bytesRead.toFloat() / (1024f * 1024f)
+                            val totalMb = state.totalBytes.toFloat() / (1024f * 1024f)
+                            val progressLabel = if (state.totalBytes > 0L) {
+                                String.format(java.util.Locale.US, "%.1f MB / %.1f MB (%d%%)", downloadedMb, totalMb, safePercent)
+                            } else {
+                                String.format(java.util.Locale.US, "%.1f MB (%d%%)", downloadedMb, safePercent)
+                            }
                             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween
                                 ) {
                                     Text("正在下载更新 APK...", color = TextPrimary, fontSize = 13.sp)
-                                    Text("${state.percent}%", color = PrimaryNeonGreen, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                                    Text(progressLabel, color = PrimaryNeonGreen, fontSize = 13.sp, fontWeight = FontWeight.Bold)
                                 }
                                 LinearProgressIndicator(
-                                    progress = { state.percent / 100f },
+                                    progress = { safePercent / 100f },
                                     modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)),
                                     color = PrimaryNeonGreen,
                                     trackColor = DividerDark

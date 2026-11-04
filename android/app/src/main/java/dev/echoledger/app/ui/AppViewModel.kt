@@ -616,13 +616,13 @@ class AppViewModel @JvmOverloads constructor(
 
         _updateState.value = UpdateState.Downloading(0L, release.apkAsset.sizeBytes, 0)
         val job = viewModelScope.launch {
-            if (isCachedApkValid(release)) {
-                val apkFile = updateDownloader.getApkFile(release.versionName)
-                _updateState.value = UpdateState.ReadyToInstall(apkFile, release)
-                return@launch
-            }
-
             try {
+                if (isCachedApkValid(release)) {
+                    val apkFile = updateDownloader.getApkFile(release.versionName)
+                    _updateState.value = UpdateState.ReadyToInstall(apkFile, release)
+                    return@launch
+                }
+
                 updateDownloader.download(release).collect { progress ->
                     _updateState.value = UpdateState.Downloading(
                         bytesRead = progress.bytesRead,
@@ -634,7 +634,7 @@ class AppViewModel @JvmOverloads constructor(
                 _updateState.value = UpdateState.ReadyToInstall(apkFile, release)
             } catch (e: CancellationException) {
                 throw e
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 _updateState.value = UpdateState.Error(
                     message = e.message ?: "下载更新失败: ${e.javaClass.simpleName}",
                     canRetry = true

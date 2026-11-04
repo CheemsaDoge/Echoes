@@ -49,8 +49,8 @@ jobs:
           echo "$RELEASE_KEYSTORE_BASE64" | base64 -d > "${RUNNER_TEMP}/release.keystore"
           echo "RELEASE_KEYSTORE_PATH=${RUNNER_TEMP}/release.keystore" >> "$GITHUB_ENV"
 
-      - name: Run Core unit tests
-        run: ./gradlew :core:test
+      - name: Run unit tests
+        run: ./gradlew :core:test :app:testDebugUnitTest
 
       - name: Build Release APK
         run: ./gradlew assembleRelease

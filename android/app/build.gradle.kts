@@ -23,8 +23,20 @@ val versionMajor = 0
 val versionMinor = 2
 // Tag v0.2.0 (b6a4b2b) is at commit count 43; every commit after it increments patch by 1 (0.2.1, 0.2.2, 0.2.3...)
 val v020BaseCommitCount = 43
-val overrideVersionCode = (project.findProperty("VERSION_CODE") as? String)?.toIntOrNull()
-val overrideVersionName = (project.findProperty("VERSION_NAME") as? String)?.takeIf { it.isNotBlank() }
+val overrideVersionCode = project.findProperty("VERSION_CODE")?.toString()?.let { raw ->
+    val parsed = raw.trim().toIntOrNull()
+    if (parsed == null || parsed < 1) {
+        error("Invalid VERSION_CODE override '$raw': must be a positive integer (>= 1).")
+    }
+    parsed
+}
+val overrideVersionName = project.findProperty("VERSION_NAME")?.toString()?.let { raw ->
+    val trimmed = raw.trim()
+    if (trimmed.isEmpty()) {
+        error("Invalid VERSION_NAME override: must not be blank.")
+    }
+    trimmed
+}
 val needsGitVersion = overrideVersionCode == null || overrideVersionName == null
 val totalGitCommits = if (needsGitVersion) {
     gitExecOutput("git", "rev-list", "--count", "HEAD")?.toIntOrNull()
@@ -50,6 +62,16 @@ val versionPatch = effectiveCommitCount - v020BaseCommitCount
 val computedVersionCode = overrideVersionCode ?: effectiveCommitCount
 val computedVersionName = overrideVersionName ?: "$versionMajor.$versionMinor.$versionPatch"
 
+fun nonBlankEnvOrProp(vararg keys: String): String? {
+    for (key in keys) {
+        val envVal = System.getenv(key)?.takeIf { it.isNotBlank() }
+        if (envVal != null) return envVal
+        val propVal = (project.findProperty(key) as? String)?.takeIf { it.isNotBlank() }
+        if (propVal != null) return propVal
+    }
+    return null
+}
+
 android {
     namespace = "dev.echoledger.app"
     compileSdk = 35
@@ -61,32 +83,20 @@ android {
         versionName = computedVersionName
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
-    val releaseKeystorePath = System.getenv("RELEASE_KEYSTORE_PATH")
-        ?: System.getenv("KEYSTORE_PATH")
-        ?: (project.findProperty("RELEASE_KEYSTORE_PATH") as? String)
-        ?: (project.findProperty("KEYSTORE_PATH") as? String)
+    val releaseKeystorePath = nonBlankEnvOrProp("RELEASE_KEYSTORE_PATH", "KEYSTORE_PATH")
 
-    val releaseSigning = if (!releaseKeystorePath.isNullOrBlank()) {
+    val releaseSigning = if (releaseKeystorePath != null) {
         val ks = file(releaseKeystorePath)
         if (!ks.exists()) {
             error("Configured release keystore file not found at: ${ks.absolutePath}")
         }
         signingConfigs.create("release") {
             storeFile = ks
-            storePassword = System.getenv("RELEASE_KEYSTORE_PASSWORD")
-                ?: System.getenv("KEYSTORE_PASSWORD")
-                ?: (project.findProperty("RELEASE_KEYSTORE_PASSWORD") as? String)
-                ?: (project.findProperty("KEYSTORE_PASSWORD") as? String)
+            storePassword = nonBlankEnvOrProp("RELEASE_KEYSTORE_PASSWORD", "KEYSTORE_PASSWORD")
                 ?: "android"
-            keyAlias = System.getenv("RELEASE_KEY_ALIAS")
-                ?: System.getenv("KEYSTORE_ALIAS")
-                ?: (project.findProperty("RELEASE_KEY_ALIAS") as? String)
-                ?: (project.findProperty("KEYSTORE_ALIAS") as? String)
+            keyAlias = nonBlankEnvOrProp("RELEASE_KEY_ALIAS", "KEYSTORE_ALIAS")
                 ?: "release"
-            keyPassword = System.getenv("RELEASE_KEY_PASSWORD")
-                ?: System.getenv("KEY_PASSWORD")
-                ?: (project.findProperty("RELEASE_KEY_PASSWORD") as? String)
-                ?: (project.findProperty("KEY_PASSWORD") as? String)
+            keyPassword = nonBlankEnvOrProp("RELEASE_KEY_PASSWORD", "KEY_PASSWORD")
                 ?: storePassword
         }
     } else {

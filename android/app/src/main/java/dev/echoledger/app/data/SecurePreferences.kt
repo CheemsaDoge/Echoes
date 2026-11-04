@@ -117,7 +117,7 @@ class SecurePreferences(
         set(value) { prefs.edit().putString("transcription_mode", value.trim()).commit() }
 
     var showDemoDataWhenEmpty: Boolean
-        get() = prefs.getBoolean("show_demo_data_empty", true)
+        get() = prefs.getBoolean("show_demo_data_empty", false)
         set(value) { prefs.edit().putBoolean("show_demo_data_empty", value).commit() }
 
     var vadProvider: String

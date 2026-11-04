@@ -7,6 +7,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -17,8 +18,10 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
+import androidx.compose.material.icons.outlined.DateRange
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -82,7 +85,7 @@ fun ScatteredDialoguesListScreen(
             verticalArrangement = Arrangement.spacedBy(12.dp),
             contentPadding = PaddingValues(vertical = 12.dp)
         ) {
-            items(fragments, key = { it.id }) { frag ->
+            itemsIndexed(fragments, key = { idx, frag -> "frag_${idx}_${frag.id}" }) { _, frag ->
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -221,7 +224,7 @@ fun PersonDetailScreen(
                 }
             }
 
-            items(personEvents, key = { "person_ev_${it.id}" }) { event ->
+            itemsIndexed(personEvents, key = { idx, event -> "person_ev_${idx}_${event.id}" }) { _, event ->
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -366,6 +369,30 @@ fun ActivitiesScreen(
     events: List<MemoryEvent>,
     onEventClick: (MemoryEvent) -> Unit
 ) {
+    if (events.isEmpty()) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(BgDark)
+                .padding(32.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Icon(
+                    imageVector = Icons.Outlined.DateRange,
+                    contentDescription = null,
+                    tint = TextMuted,
+                    modifier = Modifier.size(48.dp)
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                Text("暂无活动记录", color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(modifier = Modifier.height(6.dp))
+                Text("开启全时聆听后，系统将自动汇总记忆与活动", color = TextSecondary, fontSize = 13.sp)
+            }
+        }
+        return
+    }
+
     val grouped = remember(events) {
         events.groupBy { it.dayGroupLabel }
     }
@@ -389,7 +416,7 @@ fun ActivitiesScreen(
                     modifier = Modifier.padding(top = 6.dp, bottom = 2.dp)
                 )
             }
-            items(groupEvents, key = { "act_${it.id}" }) { event ->
+            itemsIndexed(groupEvents, key = { idx, event -> "act_${idx}_${event.id}" }) { _, event ->
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -435,6 +462,30 @@ fun PeopleScreen(
     onOpenUnrecognizedVoices: () -> Unit,
     onPersonClick: (PersonVoiceProfile) -> Unit
 ) {
+    if (people.isEmpty() && unrecognizedCount == 0) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(BgDark)
+                .padding(32.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Icon(
+                    imageVector = Icons.Outlined.Person,
+                    contentDescription = null,
+                    tint = TextMuted,
+                    modifier = Modifier.size(48.dp)
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                Text("暂无声纹人物档案", color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(modifier = Modifier.height(6.dp))
+                Text("录音中识别到的说话人将在此建档，支持更名与声纹标记", color = TextSecondary, fontSize = 13.sp)
+            }
+        }
+        return
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -485,7 +536,7 @@ fun PeopleScreen(
             }
 
             // Speaker Cards with Huge Number Watermark on the Right
-            items(people, key = { it.name }) { person ->
+            itemsIndexed(people, key = { idx, person -> "person_${idx}_${person.name}" }) { _, person ->
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -604,7 +655,7 @@ fun UnrecognizedVoicesScreen(
                 verticalArrangement = Arrangement.spacedBy(12.dp),
                 contentPadding = PaddingValues(vertical = 12.dp)
             ) {
-                items(clips, key = { it.id }) { clip ->
+                itemsIndexed(clips, key = { idx, clip -> "clip_${idx}_${clip.id}" }) { _, clip ->
                     val isPlaying = playingClipId == clip.id
                     Column(
                         modifier = Modifier
@@ -619,7 +670,7 @@ fun UnrecognizedVoicesScreen(
                                 modifier = Modifier
                                     .size(40.dp)
                                     .clip(CircleShape)
-                                    .background(if (isPlaying) PrimaryNeonGreen else Color(0xFF1F3523))
+                                    .background(if (isPlaying) PrimaryNeonGreen else SurfaceCardElevated)
                                     .clickable {
                                         playingClipId = if (isPlaying) null else clip.id
                                     },
@@ -800,6 +851,8 @@ fun UnrecognizedVoicesScreen(
 
 @Composable
 fun AgentScreen(
+    serverBaseUrl: String = "",
+    mcpToken: String = "",
     onOpenAgentGuide: (String) -> Unit
 ) {
     LazyColumn(
@@ -855,7 +908,7 @@ fun AgentScreen(
             Spacer(modifier = Modifier.height(28.dp))
             Column(modifier = Modifier.fillMaxWidth()) {
                 Text(
-                    text = "已创建的 Agent",
+                    text = "MCP 服务端连接状态",
                     color = TextSecondary,
                     fontSize = 13.sp
                 )
@@ -865,24 +918,32 @@ fun AgentScreen(
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(12.dp))
                         .background(SurfaceDark)
-                        .border(1.dp, DividerDark, RoundedCornerShape(12.dp))
-                        .clickable { onOpenAgentGuide("Antigravity") }
+                        .border(
+                            1.dp,
+                            if (mcpToken.isNotBlank()) PrimaryNeonGreen.copy(alpha = 0.5f) else DividerDark,
+                            RoundedCornerShape(12.dp)
+                        )
+                        .clickable { onOpenAgentGuide("MCP Server") }
                         .padding(16.dp)
                         .testTag("created_agent_antigravity"),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = "Antigravity",
+                            text = "MCP Server (Model Context Protocol)",
                             color = TextPrimary,
                             fontSize = 16.sp,
                             fontWeight = FontWeight.SemiBold
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = "创建于 昨天 · 未使用",
-                            color = TextSecondary,
+                            text = if (mcpToken.isNotBlank()) {
+                                "安全令牌已配置 · 记忆上下文通道就绪"
+                            } else {
+                                "未配置安全令牌 · 点击前往配置 Claude / Cursor 提示词"
+                            },
+                            color = if (mcpToken.isNotBlank()) PrimaryNeonGreen else TextSecondary,
                             fontSize = 12.sp
                         )
                     }
@@ -959,7 +1020,7 @@ private fun AgentBrandSymbol(id: String) {
         "antigravity" -> "▲" to Color(0xFF4285F4)
         "openclaw" -> "🦀" to Color(0xFFE54D42)
         "grok" -> "𝕏" to TextPrimary
-        "workbuddy" -> "🐾" to Color(0xFF52C41A)
+        "workbuddy" -> "🐾" to PrimaryNeonGreen
         "deepseek" -> "🐋" to Color(0xFF4D6BFE)
         else -> "•••" to TextSecondary
     }

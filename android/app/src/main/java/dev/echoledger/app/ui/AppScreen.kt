@@ -58,30 +58,18 @@ fun AppScreen(
         rawEvents.map { jsonToMemoryEvent(it) }
     }
     val convertedRealPeople = remember(rawPeople) {
-        rawPeople.map { jsonToPersonVoiceProfile(it) }
+        rawPeople.mapNotNull { runCatching { jsonToPersonVoiceProfile(it) }.getOrNull() }
+            .groupBy { it.name }
+            .map { (name, list) -> PersonVoiceProfile(name = name, dialogueCount = list.sumOf { it.dialogueCount }.coerceAtLeast(1)) }
     }
 
-    // Isolate demo fixtures: only show fixtures when user has no real records and demo switch is enabled
-    var events by remember(convertedRealEvents, showDemoDataWhenEmpty) {
-        val list = if (convertedRealEvents.isNotEmpty()) {
-            convertedRealEvents
-        } else if (showDemoDataWhenEmpty) {
-            SampleMemoryData.events
-        } else {
-            emptyList()
-        }
-        mutableStateOf(list)
+    // Strictly use real data only
+    var events by remember(convertedRealEvents) {
+        mutableStateOf(convertedRealEvents)
     }
 
-    var people by remember(convertedRealPeople, showDemoDataWhenEmpty) {
-        val list = if (convertedRealPeople.isNotEmpty()) {
-            convertedRealPeople
-        } else if (showDemoDataWhenEmpty) {
-            SampleMemoryData.initialPeople
-        } else {
-            emptyList()
-        }
-        mutableStateOf(list)
+    var people by remember(convertedRealPeople) {
+        mutableStateOf(convertedRealPeople)
     }
 
     // Populate unrecognized voice clips from actual unassigned event segments
@@ -91,9 +79,9 @@ fun AppScreen(
             val segs = evJson.optJSONArray("segments") ?: return@forEach
             for (i in 0 until segs.length()) {
                 val seg = segs.optJSONObject(i) ?: continue
-                val spk = seg.optString("speaker_name")
-                if (spk.isBlank() || spk.contains("待确认") || spk.contains("未识别") || spk.equals("Unknown", ignoreCase = true)) {
-                    val id = seg.optString("id", "clip_${list.size}")
+                val spk = if (seg.isNull("speaker_name")) "" else seg.optString("speaker_name")
+                if (spk.isBlank() || spk == "null" || spk.contains("待确认") || spk.contains("未识别") || spk.equals("Unknown", ignoreCase = true)) {
+                    val id = "${evJson.optString("id", "ev")}_seg_${i}_${list.size}"
                     val text = seg.optString("text")
                     if (text.isNotBlank()) {
                         val startMs = seg.optLong("start_ms", System.currentTimeMillis())
@@ -116,15 +104,8 @@ fun AppScreen(
         list
     }
 
-    var unrecognizedClips by remember(realUnrecognizedClips, showDemoDataWhenEmpty) {
-        val list = if (realUnrecognizedClips.isNotEmpty()) {
-            realUnrecognizedClips
-        } else if (showDemoDataWhenEmpty) {
-            SampleMemoryData.initialUnrecognizedClips
-        } else {
-            emptyList()
-        }
-        mutableStateOf(list)
+    var unrecognizedClips: List<UnrecognizedVoiceClip> by remember(realUnrecognizedClips) {
+        mutableStateOf(realUnrecognizedClips.toList())
     }
 
     // Secondary navigation overlays
@@ -229,6 +210,7 @@ fun AppScreen(
                             isCalendarExpanded = isCalendarExpanded,
                             onToggleCalendarExpanded = { isCalendarExpanded = !isCalendarExpanded },
                             events = events,
+                            needsConfigGuide = (vm.repo.prefs.aiApiKey.isBlank() && vm.repo.prefs.token.isBlank()),
                             isListening = recordingState.recording,
                             isProcessingSavedListening = (!recordingState.recording && (vm.pending.collectAsStateWithLifecycle().value > 0)),
                             onStopListening = onStop,
@@ -236,7 +218,7 @@ fun AppScreen(
                             onScatteredFragmentsClick = { fragments ->
                                 activeScatteredFragments = fragments
                             },
-                            onUpgradeClick = { activeSettingsSubPage = SettingsSubPage.SUBSCRIPTION },
+                            onUpgradeClick = { activeSettingsSubPage = SettingsSubPage.AI_TRANSCRIPTION },
                             onQuickAiClick = {
                                 val firstForDay = events.firstOrNull { it.dayNumber == selectedDay }
                                     ?: events.firstOrNull()

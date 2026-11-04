@@ -2,6 +2,10 @@
 package dev.echoledger.app.ui.components
 
 import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
+import android.os.PowerManager
+import androidx.core.content.ContextCompat
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
@@ -47,11 +51,8 @@ enum class SettingsSubPage {
     AI_TRANSCRIPTION,
     VAD_SETTINGS,
     VOICEPRINT_SETTINGS,
-    STORAGE_AND_UPDATE,
-    SUBSCRIPTION,
     AUTO_LISTEN,
-    LABS,
-    PRIVACY
+    STORAGE_AND_UPDATE
 }
 
 @Composable
@@ -90,21 +91,12 @@ fun SettingsOverlayScreen(
             vm = vm,
             onBack = { currentSubPage = SettingsSubPage.MAIN }
         )
-        SettingsSubPage.STORAGE_AND_UPDATE -> StorageAndUpdatePage(
-            vm = vm,
-            onBack = { currentSubPage = SettingsSubPage.MAIN }
-        )
-        SettingsSubPage.SUBSCRIPTION -> SubscriptionQuotaPage(
-            onBack = { currentSubPage = SettingsSubPage.MAIN }
-        )
         SettingsSubPage.AUTO_LISTEN -> AutoListeningPage(
             vm = vm,
             onBack = { currentSubPage = SettingsSubPage.MAIN }
         )
-        SettingsSubPage.LABS -> LabsHardwarePage(
-            onBack = { currentSubPage = SettingsSubPage.MAIN }
-        )
-        SettingsSubPage.PRIVACY -> PrivacySecurityPage(
+        SettingsSubPage.STORAGE_AND_UPDATE -> StorageAndUpdatePage(
+            vm = vm,
             onBack = { currentSubPage = SettingsSubPage.MAIN }
         )
     }
@@ -161,9 +153,9 @@ private fun SettingsMainPage(
             verticalArrangement = Arrangement.spacedBy(18.dp),
             contentPadding = PaddingValues(vertical = 12.dp)
         ) {
-            // Section: 核心引擎与 AI 设置 (Highlighted Top Priority)
+            // Section: 系统核心设置 (5 项实用功能)
             item {
-                SettingsSectionTitle("核心引擎与 AI 设置")
+                SettingsSectionTitle("系统设置")
                 Spacer(modifier = Modifier.height(8.dp))
                 Column(
                     modifier = Modifier
@@ -201,168 +193,18 @@ private fun SettingsMainPage(
                     )
                     HorizontalDivider(color = DividerDark)
                     SettingsRowItem(
-                        icon = Icons.Outlined.SystemUpdate,
-                        title = "存储管理与应用更新",
-                        trailingValue = "v${BuildConfig.VERSION_NAME}${if (pendingCount > 0) " · 待上传 $pendingCount" else ""}",
-                        onClick = { onNavigate(SettingsSubPage.STORAGE_AND_UPDATE) },
-                        testTag = "settings_storage_update_row"
-                    )
-                }
-            }
-
-            // Section: 账户
-            item {
-                SettingsSectionTitle("账户")
-                Spacer(modifier = Modifier.height(8.dp))
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(SurfaceDark)
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(16.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(48.dp)
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(PrimaryNeonGreen),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = "D",
-                                color = Color.White,
-                                fontSize = 22.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-                        Spacer(modifier = Modifier.width(14.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Doge Cheems",
-                                color = TextPrimary,
-                                fontSize = 17.sp,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = "cheemsadoge@gmail.com",
-                                color = TextSecondary,
-                                fontSize = 13.sp
-                            )
-                        }
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                            contentDescription = null,
-                            tint = TextMuted
-                        )
-                    }
-                    HorizontalDivider(color = DividerDark)
-                    SettingsRowItem(
-                        icon = Icons.Outlined.Equalizer,
-                        title = "订阅与用量",
-                        onClick = { onNavigate(SettingsSubPage.SUBSCRIPTION) },
-                        testTag = "settings_subscription_row"
-                    )
-                }
-            }
-
-            // Section: 聆听与偏好
-            item {
-                SettingsSectionTitle("聆听与偏好")
-                Spacer(modifier = Modifier.height(8.dp))
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(SurfaceDark)
-                ) {
-                    SettingsRowItem(
                         icon = Icons.Outlined.MicNone,
-                        title = "自动聆听",
+                        title = "聆听权限与后台自检",
                         onClick = { onNavigate(SettingsSubPage.AUTO_LISTEN) },
                         testTag = "settings_auto_listen_row"
                     )
                     HorizontalDivider(color = DividerDark)
                     SettingsRowItem(
-                        icon = Icons.Outlined.Info,
-                        title = "聆听中断帮助",
-                        onClick = {}
-                    )
-                    HorizontalDivider(color = DividerDark)
-                    SettingsRowItem(
-                        icon = Icons.Outlined.LightMode,
-                        title = "外观",
-                        trailingValue = "深色 (Dark Neon)",
-                        onClick = {}
-                    )
-                    HorizontalDivider(color = DividerDark)
-                    SettingsRowItem(
-                        icon = Icons.Outlined.Language,
-                        title = "语言与时区",
-                        trailingValue = "中文 · UTC+8",
-                        onClick = {}
-                    )
-                    HorizontalDivider(color = DividerDark)
-                    SettingsRowItem(
-                        icon = Icons.Outlined.Science,
-                        title = "实验室",
-                        onClick = { onNavigate(SettingsSubPage.LABS) },
-                        testTag = "settings_labs_row"
-                    )
-                }
-            }
-
-            // Section: 隐私
-            item {
-                SettingsSectionTitle("隐私")
-                Spacer(modifier = Modifier.height(8.dp))
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(SurfaceDark)
-                ) {
-                    SettingsRowItem(
-                        icon = Icons.Outlined.Shield,
-                        title = "隐私与安全",
-                        onClick = { onNavigate(SettingsSubPage.PRIVACY) },
-                        testTag = "settings_privacy_row"
-                    )
-                    HorizontalDivider(color = DividerDark)
-                    SettingsRowItem(
-                        icon = Icons.Outlined.Lock,
-                        title = "权限管理",
-                        onClick = {}
-                    )
-                }
-            }
-
-            // Section: 支持
-            item {
-                SettingsSectionTitle("支持")
-                Spacer(modifier = Modifier.height(8.dp))
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(SurfaceDark)
-                ) {
-                    SettingsRowItem(
-                        icon = Icons.Outlined.ChatBubbleOutline,
-                        title = "反馈与建议",
-                        onClick = {}
-                    )
-                    HorizontalDivider(color = DividerDark)
-                    SettingsRowItem(
-                        icon = Icons.Outlined.Info,
-                        title = "关于 EchoLedger",
-                        trailingValue = "v${BuildConfig.VERSION_NAME}",
-                        onClick = { onNavigate(SettingsSubPage.STORAGE_AND_UPDATE) }
+                        icon = Icons.Outlined.SystemUpdate,
+                        title = "存储管理与应用更新",
+                        trailingValue = "v${BuildConfig.VERSION_NAME}${if (pendingCount > 0) " · 待上传 $pendingCount" else ""}",
+                        onClick = { onNavigate(SettingsSubPage.STORAGE_AND_UPDATE) },
+                        testTag = "settings_storage_update_row"
                     )
                 }
                 Spacer(modifier = Modifier.height(24.dp))
@@ -505,7 +347,7 @@ private fun AiTranscriptionSettingsPage(
                             val selected = mode == m
                             Surface(
                                 shape = RoundedCornerShape(8.dp),
-                                color = if (selected) Color(0xFF1D3322) else Color(0xFF222824),
+                                color = if (selected) TagBg else Color(0xFF1E2124),
                                 border = androidx.compose.foundation.BorderStroke(
                                     1.dp,
                                     if (selected) PrimaryNeonGreen else DividerDark
@@ -579,7 +421,7 @@ private fun AiTranscriptionSettingsPage(
                             onClick = {
                                 vm.saveServerConfig(baseUrl, serverToken, mcpToken)
                             },
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF263328)),
+                            colors = ButtonDefaults.buttonColors(containerColor = SurfaceCardElevated),
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Icon(Icons.Outlined.Sync, null, modifier = Modifier.size(16.dp), tint = PrimaryNeonGreen)
@@ -614,7 +456,7 @@ private fun AiTranscriptionSettingsPage(
                             val selected = provider == p
                             Surface(
                                 shape = RoundedCornerShape(8.dp),
-                                color = if (selected) Color(0xFF1D3322) else Color(0xFF222824),
+                                color = if (selected) TagBg else Color(0xFF1E2124),
                                 border = androidx.compose.foundation.BorderStroke(
                                     1.dp,
                                     if (selected) PrimaryNeonGreen else DividerDark
@@ -641,7 +483,7 @@ private fun AiTranscriptionSettingsPage(
                             val selected = modelName == m
                             Surface(
                                 shape = RoundedCornerShape(6.dp),
-                                color = if (selected) Color(0xFF1D3322) else Color(0xFF222824),
+                                color = if (selected) TagBg else Color(0xFF1E2124),
                                 border = androidx.compose.foundation.BorderStroke(1.dp, if (selected) PrimaryNeonGreen else DividerDark),
                                 modifier = Modifier.clickable { modelName = m }
                             ) {
@@ -673,7 +515,7 @@ private fun AiTranscriptionSettingsPage(
                             val selected = txMode == t
                             Surface(
                                 shape = RoundedCornerShape(8.dp),
-                                color = if (selected) Color(0xFF1D3322) else Color(0xFF222824),
+                                color = if (selected) TagBg else Color(0xFF1E2124),
                                 border = androidx.compose.foundation.BorderStroke(1.dp, if (selected) PrimaryNeonGreen else DividerDark),
                                 modifier = Modifier.weight(1f).clickable { txMode = t }
                             ) {
@@ -750,7 +592,7 @@ private fun AiTranscriptionSettingsPage(
                                 endpoint = endpoint
                             )
                         },
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF263328)),
+                        colors = ButtonDefaults.buttonColors(containerColor = SurfaceCardElevated),
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         if (aiTesting) {
@@ -897,7 +739,7 @@ private fun VadSettingsPage(
                             val selected = provider == eng
                             Surface(
                                 shape = RoundedCornerShape(8.dp),
-                                color = if (selected) Color(0xFF1D3322) else Color(0xFF222824),
+                                color = if (selected) TagBg else Color(0xFF1E2124),
                                 border = androidx.compose.foundation.BorderStroke(1.dp, if (selected) PrimaryNeonGreen else DividerDark),
                                 modifier = Modifier.clickable { provider = eng }
                             ) {
@@ -1054,7 +896,7 @@ private fun VadSettingsPage(
                             val selected = calScenario == sc
                             Surface(
                                 shape = RoundedCornerShape(6.dp),
-                                color = if (selected) Color(0xFF1D3322) else Color(0xFF222824),
+                                color = if (selected) TagBg else Color(0xFF1E2124),
                                 border = androidx.compose.foundation.BorderStroke(1.dp, if (selected) PrimaryNeonGreen else DividerDark),
                                 modifier = Modifier.weight(1f).clickable { calScenario = sc }
                             ) {
@@ -1082,7 +924,7 @@ private fun VadSettingsPage(
                     ) {
                         Button(
                             onClick = { onRecord(true) },
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF263328)),
+                            colors = ButtonDefaults.buttonColors(containerColor = SurfaceCardElevated),
                             modifier = Modifier.weight(1f)
                         ) {
                             Icon(Icons.Outlined.Mic, null, modifier = Modifier.size(16.dp), tint = PrimaryNeonGreen)
@@ -1091,7 +933,7 @@ private fun VadSettingsPage(
                         }
                         Button(
                             onClick = { vm.sweepVad(calScenario, calIntervals) },
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF263328)),
+                            colors = ButtonDefaults.buttonColors(containerColor = SurfaceCardElevated),
                             modifier = Modifier.weight(1f)
                         ) {
                             Icon(Icons.Outlined.Analytics, null, modifier = Modifier.size(16.dp), tint = PrimaryNeonGreen)
@@ -1103,7 +945,7 @@ private fun VadSettingsPage(
                     if (evaluation != null) {
                         Surface(
                             shape = RoundedCornerShape(8.dp),
-                            color = Color(0xFF16241B),
+                            color = SurfaceCardGreen,
                             border = androidx.compose.foundation.BorderStroke(1.dp, SurfaceCardGreenBorder),
                             modifier = Modifier.fillMaxWidth()
                         ) {
@@ -1304,7 +1146,7 @@ private fun VoiceprintSettingsPage(
                             val selected = modelId == m
                             Surface(
                                 shape = RoundedCornerShape(8.dp),
-                                color = if (selected) Color(0xFF1D3322) else Color(0xFF222824),
+                                color = if (selected) TagBg else Color(0xFF1E2124),
                                 border = androidx.compose.foundation.BorderStroke(1.dp, if (selected) PrimaryNeonGreen else DividerDark),
                                 modifier = Modifier.clickable { modelId = m }
                             ) {
@@ -1548,8 +1390,8 @@ private fun StorageAndUpdatePage(
                         }
                         Surface(
                             shape = RoundedCornerShape(6.dp),
-                            color = Color(0xFF1D3322),
-                            border = androidx.compose.foundation.BorderStroke(1.dp, PrimaryNeonGreen)
+                            color = TagBg,
+                            border = androidx.compose.foundation.BorderStroke(1.dp, SurfaceCardGreenBorder)
                         ) {
                             Text(
                                 text = "GitHub Channel",
@@ -1567,7 +1409,7 @@ private fun StorageAndUpdatePage(
                         is UpdateState.Idle -> {
                             Button(
                                 onClick = { vm.checkForUpdates(silent = false) },
-                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF263328)),
+                                colors = ButtonDefaults.buttonColors(containerColor = SurfaceCardElevated),
                                 modifier = Modifier.fillMaxWidth().testTag("check_update_button")
                             ) {
                                 Icon(Icons.Outlined.Refresh, null, modifier = Modifier.size(16.dp), tint = PrimaryNeonGreen)
@@ -1718,7 +1560,7 @@ private fun StorageAndUpdatePage(
                     ) {
                         Button(
                             onClick = { vm.saveAllToDownloads() },
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF263328)),
+                            colors = ButtonDefaults.buttonColors(containerColor = SurfaceCardElevated),
                             modifier = Modifier.weight(1f)
                         ) {
                             Icon(Icons.Outlined.FolderZip, null, modifier = Modifier.size(16.dp), tint = PrimaryNeonGreen)
@@ -1734,41 +1576,6 @@ private fun StorageAndUpdatePage(
                             Spacer(Modifier.width(6.dp))
                             Text("立即同步", color = TextPrimary, fontSize = 13.sp)
                         }
-                    }
-                }
-            }
-
-            // 数据展示与演示模式
-            item {
-                SettingsSectionTitle("数据展示与演示模式")
-                Spacer(modifier = Modifier.height(8.dp))
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(SurfaceDark)
-                        .padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    val showDemoData by vm.showDemoDataWhenEmpty.collectAsStateWithLifecycle()
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("无真实数据时展示示例数据", color = TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.Medium)
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text("开启后若本地及服务端暂无录音事件，将在时间线中展示演示样例。", color = TextMuted, fontSize = 12.sp)
-                        }
-                        Switch(
-                            checked = showDemoData,
-                            onCheckedChange = { vm.setShowDemoData(it) },
-                            colors = SwitchDefaults.colors(
-                                checkedThumbColor = Color.White,
-                                checkedTrackColor = PrimaryNeonGreen
-                            )
-                        )
                     }
                 }
             }
@@ -1812,26 +1619,43 @@ private fun StorageAndUpdatePage(
 }
 
 // -------------------------------------------------------------
-// Subpage 5: 自动聆听与自检
+// Subpage 5: 聆听权限与后台自检
 // -------------------------------------------------------------
 @Composable
 private fun AutoListeningPage(
     vm: AppViewModel,
     onBack: () -> Unit
 ) {
-    var workdayScheduleEnabled by remember { mutableStateOf(true) }
-    var weekendScheduleEnabled by remember { mutableStateOf(false) }
-    val days = listOf("一", "二", "三", "四", "五", "六", "日")
-    var selectedDays by remember { mutableStateOf(setOf("一", "二", "三", "四", "五")) }
+    val context = LocalContext.current
+    var selfCheckTrigger by remember { mutableStateOf(0) }
 
-    var selfCheckRunning by remember { mutableStateOf(false) }
+    val hasMicPermission = remember(selfCheckTrigger) {
+        ContextCompat.checkSelfPermission(
+            context,
+            android.Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+    }
+    val hasNotificationPermission = remember(selfCheckTrigger) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.checkSelfPermission(
+                context,
+                android.Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+        } else {
+            true
+        }
+    }
+    val isBatteryOptimizationsIgnored = remember(selfCheckTrigger) {
+        val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+        pm?.isIgnoringBatteryOptimizations(context.packageName) == true
+    }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(BgDark)
     ) {
-        SubPageTopBar(title = "自动聆听与自检", onBack = onBack)
+        SubPageTopBar(title = "聆听权限与后台自检", onBack = onBack)
 
         LazyColumn(
             modifier = Modifier
@@ -1840,151 +1664,8 @@ private fun AutoListeningPage(
             verticalArrangement = Arrangement.spacedBy(16.dp),
             contentPadding = PaddingValues(vertical = 12.dp)
         ) {
-            // 1. 工作日日程
             item {
-                SettingsSectionTitle("工作日日程")
-                Spacer(modifier = Modifier.height(8.dp))
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(SurfaceDark)
-                        .padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column {
-                            Text("工作日自动提醒开启", color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text("周一至周五 · 09:00 – 18:00", color = TextSecondary, fontSize = 13.sp)
-                        }
-                        Switch(
-                            checked = workdayScheduleEnabled,
-                            onCheckedChange = { workdayScheduleEnabled = it },
-                            colors = SwitchDefaults.colors(
-                                checkedThumbColor = Color.White,
-                                checkedTrackColor = PrimaryNeonGreen
-                            )
-                        )
-                    }
-                }
-            }
-
-            // 2. 周末日程
-            item {
-                SettingsSectionTitle("周末日程")
-                Spacer(modifier = Modifier.height(8.dp))
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(SurfaceDark)
-                        .padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column {
-                            Text("周末自动提醒开启", color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text("周六、周日 · 10:00 – 20:00", color = TextSecondary, fontSize = 13.sp)
-                        }
-                        Switch(
-                            checked = weekendScheduleEnabled,
-                            onCheckedChange = { weekendScheduleEnabled = it },
-                            colors = SwitchDefaults.colors(
-                                checkedThumbColor = Color.White,
-                                checkedTrackColor = PrimaryNeonGreen
-                            )
-                        )
-                    }
-                }
-            }
-
-            // 3. 自定义重复日
-            item {
-                SettingsSectionTitle("自定义重复日")
-                Spacer(modifier = Modifier.height(8.dp))
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(SurfaceDark)
-                        .padding(16.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        days.forEach { d ->
-                            val active = selectedDays.contains(d)
-                            Box(
-                                modifier = Modifier
-                                    .size(38.dp)
-                                    .clip(CircleShape)
-                                    .background(if (active) Color(0xFF1D3322) else Color.Transparent)
-                                    .border(1.5.dp, if (active) PrimaryNeonGreen else DividerDark, CircleShape)
-                                    .clickable {
-                                        selectedDays = if (active) selectedDays - d else selectedDays + d
-                                    },
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = d,
-                                    color = if (active) PrimaryNeonGreen else TextSecondary,
-                                    fontSize = 14.sp,
-                                    fontWeight = FontWeight.SemiBold
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-
-            // 4. 底部通知权限状态卡
-            item {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(SurfaceDark)
-                        .padding(16.dp)
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = Icons.Default.Notifications,
-                            contentDescription = null,
-                            tint = PrimaryNeonGreen,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = "通知权限已开启",
-                            color = TextPrimary,
-                            fontSize = 15.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                    }
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = "受系统隐私保护，EchoLedger 不能静默打开麦克风；到设定时段会准时通过时效性通知提醒开启，保障自主掌控。",
-                        color = TextSecondary,
-                        fontSize = 13.sp,
-                        lineHeight = 20.sp
-                    )
-                }
-            }
-
-            // 5. Android 聆听自检项 (排查后台保活与麦克风配置)
-            item {
-                SettingsSectionTitle("Android 聆听自检项")
+                SettingsSectionTitle("系统权限与后台诊断")
                 Spacer(modifier = Modifier.height(8.dp))
                 Column(
                     modifier = Modifier
@@ -1993,35 +1674,93 @@ private fun AutoListeningPage(
                         .background(SurfaceDark)
                         .border(1.dp, SurfaceCardGreenBorder, RoundedCornerShape(14.dp))
                         .padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                    verticalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
-                    Text("后台保活与音频采集环境诊断：", color = TextSecondary, fontSize = 13.sp)
-
-                    val checkItems = listOf(
-                        "麦克风录音权限 (RECORD_AUDIO)" to "已授权，支持连续 PCM 采集",
-                        "时效性通知权限 (POST_NOTIFICATIONS)" to "已开启，中断告警与日程提醒正常",
-                        "电池优化与后台保活 (Battery Optimization)" to "已加入白名单，防止后台被系统杀死",
-                        "麦克风防抢占与中断自愈" to "已激活，电话挂断后自动退避重连",
-                        "前台常驻服务 (Foreground Service)" to "运行正常，通知栏常驻录制控制"
-                    )
-
-                    checkItems.forEach { (title, subtitle) ->
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.Top
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.CheckCircle,
-                                contentDescription = null,
-                                tint = PrimaryNeonGreen,
-                                modifier = Modifier.size(18.dp)
+                    // Item 1: Mic
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.Top
+                    ) {
+                        Icon(
+                            imageVector = if (hasMicPermission) Icons.Default.CheckCircle else Icons.Default.Warning,
+                            contentDescription = null,
+                            tint = if (hasMicPermission) PrimaryNeonGreen else DangerRed,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column {
+                            Text(
+                                text = "麦克风录音权限 (RECORD_AUDIO)",
+                                color = TextPrimary,
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.SemiBold
                             )
-                            Spacer(modifier = Modifier.width(10.dp))
-                            Column {
-                                Text(text = title, color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                                Spacer(modifier = Modifier.height(2.dp))
-                                Text(text = subtitle, color = TextMuted, fontSize = 12.sp)
-                            }
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = if (hasMicPermission) "已授权，支持连续 PCM 硬件音频采集" else "未授权，录音功能无法启动",
+                                color = if (hasMicPermission) TextSecondary else DangerRed,
+                                fontSize = 13.sp
+                            )
+                        }
+                    }
+
+                    HorizontalDivider(color = DividerDark)
+
+                    // Item 2: Notification
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.Top
+                    ) {
+                        Icon(
+                            imageVector = if (hasNotificationPermission) Icons.Default.CheckCircle else Icons.Default.Warning,
+                            contentDescription = null,
+                            tint = if (hasNotificationPermission) PrimaryNeonGreen else DangerRed,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column {
+                            Text(
+                                text = "时效性通知权限 (POST_NOTIFICATIONS)",
+                                color = TextPrimary,
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = if (hasNotificationPermission) "已开启，前台常驻服务与状态通知正常" else "未授权，通知栏快捷控制可能受限",
+                                color = if (hasNotificationPermission) TextSecondary else DangerRed,
+                                fontSize = 13.sp
+                            )
+                        }
+                    }
+
+                    HorizontalDivider(color = DividerDark)
+
+                    // Item 3: Battery Optimization
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.Top
+                    ) {
+                        Icon(
+                            imageVector = if (isBatteryOptimizationsIgnored) Icons.Default.CheckCircle else Icons.Default.Info,
+                            contentDescription = null,
+                            tint = if (isBatteryOptimizationsIgnored) PrimaryNeonGreen else TextMuted,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column {
+                            Text(
+                                text = "电池优化与后台保活 (Battery Optimization)",
+                                color = TextPrimary,
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = if (isBatteryOptimizationsIgnored) "已加入电池优化白名单，后台稳定录音不被挂起" else "未加入白名单，息屏录音可能会被系统深度睡眠冻结",
+                                color = TextSecondary,
+                                fontSize = 13.sp
+                            )
                         }
                     }
 
@@ -2029,365 +1768,18 @@ private fun AutoListeningPage(
 
                     Button(
                         onClick = {
-                            selfCheckRunning = true
-                            vm.repo.message.value = "所有聆听自检项均已通过"
-                            selfCheckRunning = false
+                            selfCheckTrigger++
+                            vm.repo.message.value = "系统自检诊断已刷新"
                         },
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF263328)),
+                        colors = ButtonDefaults.buttonColors(containerColor = SurfaceCardElevated),
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Icon(Icons.Outlined.Sync, null, modifier = Modifier.size(16.dp), tint = PrimaryNeonGreen)
                         Spacer(Modifier.width(6.dp))
-                        Text("重新运行完整自检", color = PrimaryNeonGreen, fontSize = 13.sp)
+                        Text("重新运行完整自检", color = TextPrimary, fontSize = 13.sp)
                     }
                 }
             }
-        }
-    }
-}
-
-// -------------------------------------------------------------
-// Subpage 6: 实验室
-// -------------------------------------------------------------
-@Composable
-private fun LabsHardwarePage(onBack: () -> Unit) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(BgDark)
-    ) {
-        SubPageTopBar(title = "实验室", onBack = onBack)
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 16.dp, vertical = 12.dp)
-        ) {
-            Text(
-                text = "以下为实验性功能，用于与开源硬件与前沿技术协同。",
-                color = TextSecondary,
-                fontSize = 13.sp
-            )
-            Spacer(modifier = Modifier.height(14.dp))
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(SurfaceDark)
-                    .padding(16.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Bluetooth,
-                    contentDescription = null,
-                    tint = Color(0xFF4285F4),
-                    modifier = Modifier.size(22.dp)
-                )
-                Spacer(modifier = Modifier.width(14.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "开源聆听硬件",
-                        color = TextPrimary,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(
-                        text = "配对第三方蓝牙/Wi-Fi 穿戴拾音设备",
-                        color = TextSecondary,
-                        fontSize = 13.sp
-                    )
-                }
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                    contentDescription = null,
-                    tint = TextMuted
-                )
-            }
-        }
-    }
-}
-
-// -------------------------------------------------------------
-// Subpage 7: 订阅与用量
-// -------------------------------------------------------------
-@Composable
-private fun SubscriptionQuotaPage(onBack: () -> Unit) {
-    var selectedTier by remember { mutableIntStateOf(2) } // 0=Starter, 1=Pro, 2=Max
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(BgDark)
-    ) {
-        SubPageTopBar(title = "订阅与用量", onBack = onBack)
-
-        LazyColumn(
-            modifier = Modifier
-                .weight(1f)
-                .padding(horizontal = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
-            contentPadding = PaddingValues(vertical = 12.dp)
-        ) {
-            item {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(SurfaceDark)
-                        .border(1.dp, DividerDark, RoundedCornerShape(14.dp))
-                        .padding(16.dp)
-                ) {
-                    Text(
-                        text = "端侧独立版无用量限制",
-                        color = TextPrimary,
-                        fontSize = 17.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = "自带 API Key 时直接按 Token 计费，静音时段自动由 VAD 剔除以节约算力",
-                        color = TextSecondary,
-                        fontSize = 13.sp
-                    )
-                }
-            }
-
-            item {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(Color(0xFF152018))
-                        .border(1.dp, SurfaceCardGreenBorder, RoundedCornerShape(14.dp))
-                        .padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    Text(
-                        text = "过去 6 天里，EchoLedger 为你记录了：",
-                        color = TextSecondary,
-                        fontSize = 13.sp
-                    )
-                    QuotaStatRow(boldPart = "19", normalPart = " 小时的聆听")
-                    QuotaStatRow(boldPart = "10", normalPart = " 小时是真正的对话，只按这部分计费")
-                    QuotaStatRow(boldPart = "≈US$4.35", normalPart = " 已省，静音时段自动跳过、不计额度")
-                    QuotaStatRow(boldPart = "≈10.7 万", normalPart = " 字的转写")
-                    QuotaStatRow(boldPart = "16", normalPart = " 段活动总结")
-                    QuotaStatRow(boldPart = "7", normalPart = " 位说话人被识别")
-                }
-            }
-
-            item {
-                Text("可选套餐", color = TextSecondary, fontSize = 13.sp)
-                Spacer(modifier = Modifier.height(8.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    PlanTierCard(
-                        name = "Starter",
-                        hours = "20 小时",
-                        price = "US$9.99 /月",
-                        selected = selectedTier == 0,
-                        onClick = { selectedTier = 0 },
-                        modifier = Modifier.weight(1f)
-                    )
-                    PlanTierCard(
-                        name = "Pro",
-                        hours = "60 小时",
-                        price = "US$19.99 /月",
-                        selected = selectedTier == 1,
-                        onClick = { selectedTier = 1 },
-                        modifier = Modifier.weight(1f)
-                    )
-                    PlanTierCard(
-                        name = "Max",
-                        hours = "无限",
-                        price = "US$49.99 /月",
-                        selected = selectedTier == 2,
-                        onClick = { selectedTier = 2 },
-                        modifier = Modifier.weight(1f)
-                    )
-                }
-            }
-        }
-
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 14.dp)
-                .navigationBarsPadding()
-        ) {
-            val tierName = when (selectedTier) {
-                0 -> "Starter"
-                1 -> "Pro"
-                else -> "Max"
-            }
-            Button(
-                onClick = onBack,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(50.dp)
-                    .testTag("upgrade_plan_cta_button"),
-                shape = RoundedCornerShape(10.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = PrimaryNeonGreen,
-                    contentColor = Color.Black
-                )
-            ) {
-                Text(
-                    text = "升级到 $tierName",
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun QuotaStatRow(boldPart: String, normalPart: String) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Row(verticalAlignment = Alignment.Bottom) {
-            Text(
-                text = boldPart,
-                color = TextPrimary,
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Bold
-            )
-            Text(
-                text = normalPart,
-                color = TextSecondary,
-                fontSize = 14.sp
-            )
-        }
-        Icon(
-            imageVector = Icons.Default.Check,
-            contentDescription = null,
-            tint = PrimaryNeonGreen,
-            modifier = Modifier.size(16.dp)
-        )
-    }
-}
-
-@Composable
-private fun PlanTierCard(
-    name: String,
-    hours: String,
-    price: String,
-    selected: Boolean,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    Column(
-        modifier = modifier
-            .clip(RoundedCornerShape(12.dp))
-            .background(if (selected) Color(0xFF192B1E) else SurfaceDark)
-            .border(
-                width = if (selected) 1.5.dp else 1.dp,
-                color = if (selected) PrimaryNeonGreen else DividerDark,
-                shape = RoundedCornerShape(12.dp)
-            )
-            .clickable { onClick() }
-            .padding(vertical = 16.dp, horizontal = 8.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Text(
-            text = name,
-            color = if (selected) PrimaryNeonGreen else TextSecondary,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.Medium
-        )
-        Spacer(modifier = Modifier.height(8.dp))
-        Text(
-            text = hours,
-            color = TextPrimary,
-            fontSize = 20.sp,
-            fontWeight = FontWeight.Bold
-        )
-        Spacer(modifier = Modifier.height(8.dp))
-        Text(
-            text = price,
-            color = TextSecondary,
-            fontSize = 11.sp
-        )
-    }
-}
-
-// -------------------------------------------------------------
-// Subpage 8: 隐私与安全
-// -------------------------------------------------------------
-@Composable
-private fun PrivacySecurityPage(onBack: () -> Unit) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(BgDark)
-    ) {
-        SubPageTopBar(title = "隐私与安全", onBack = onBack)
-
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(18.dp)
-        ) {
-            SettingsSectionTitle("数据与硬件加密")
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(SurfaceDark)
-                    .padding(16.dp),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Column {
-                    Text("本地硬件加密存储", color = TextPrimary, fontSize = 16.sp)
-                    Text("AndroidKeyStore AES-256-GCM", color = TextSecondary, fontSize = 12.sp)
-                }
-                Icon(Icons.Default.Check, null, tint = PrimaryNeonGreen)
-            }
-
-            SettingsSectionTitle("法律与政策文档")
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(SurfaceDark)
-            ) {
-                SimpleArrowRow("服务条款")
-                HorizontalDivider(color = DividerDark)
-                SimpleArrowRow("隐私政策")
-                HorizontalDivider(color = DividerDark)
-                SimpleArrowRow("第三方数据告知")
-            }
-        }
-    }
-}
-
-@Composable
-private fun SimpleArrowRow(title: String, trailing: String? = null) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(16.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text(title, color = TextPrimary, fontSize = 16.sp)
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            if (trailing != null) {
-                Text(trailing, color = TextSecondary, fontSize = 14.sp)
-                Spacer(modifier = Modifier.width(6.dp))
-            }
-            Icon(
-                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                contentDescription = null,
-                tint = TextMuted
-            )
         }
     }
 }

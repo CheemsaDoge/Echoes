@@ -7,6 +7,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -17,6 +18,7 @@ import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
+import androidx.compose.material.icons.outlined.VpnKey
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -138,6 +140,7 @@ fun TimelineScreen(
     events: List<MemoryEvent>,
     selectedDate: java.time.LocalDate? = null,
     onSelectDate: ((java.time.LocalDate) -> Unit)? = null,
+    needsConfigGuide: Boolean = false,
     isListening: Boolean = false,
     isProcessingSavedListening: Boolean = false,
     onStopListening: () -> Unit = {},
@@ -266,77 +269,157 @@ fun TimelineScreen(
 
             HorizontalDivider(color = DividerDark, thickness = 1.dp)
 
-            // Upgrade Quota Banner
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(Color(0xFF151C17))
-                    .clickable { onUpgradeClick() }
-                    .padding(horizontal = 16.dp, vertical = 10.dp)
-                    .testTag("quota_upgrade_banner"),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = Icons.Outlined.AutoAwesome,
-                        contentDescription = null,
-                        tint = PrimaryNeonGreen,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
+            if (needsConfigGuide) {
+                HorizontalDivider(color = DividerDark, thickness = 1.dp)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(SurfaceCardElevated)
+                        .clickable { onUpgradeClick() }
+                        .padding(horizontal = 16.dp, vertical = 10.dp)
+                        .testTag("config_guide_banner"),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Outlined.VpnKey,
+                            contentDescription = null,
+                            tint = PrimaryNeonGreen,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "尚未配置 AI 转录密钥或服务端",
+                            color = TextPrimary,
+                            fontSize = 13.sp
+                        )
+                    }
                     Text(
-                        text = "转写额度不足 1 小时，仍可聆听",
-                        color = TextPrimary,
-                        fontSize = 13.sp
+                        text = "去配置 >",
+                        color = PrimaryBrightGreen,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold
                     )
                 }
-                Text(
-                    text = "去升级 >",
-                    color = PrimaryNeonGreen,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
             }
 
             HorizontalDivider(color = DividerDark, thickness = 1.dp)
 
-            // Timeline Content
+            // Timeline Content: Persistent 24h Timeline
             Box(modifier = Modifier.weight(1f)) {
-                if (dayEvents.isEmpty() && !isListening && !isProcessingSavedListening) {
-                    EmptyDayTimelineView()
-                } else {
-                    LazyColumn(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .testTag("timeline_events_list"),
-                        contentPadding = PaddingValues(vertical = 12.dp, horizontal = 12.dp),
-                        verticalArrangement = Arrangement.spacedBy(16.dp)
-                    ) {
-                        if (isListening) {
-                            item(key = "active_listening_card") {
-                                ActiveListeningTimelineCard(onStop = onStopListening)
+                val listState = rememberLazyListState()
+                val isToday = remember(selectedDate, today) {
+                    if (selectedDate != null && today != null) selectedDate == today
+                    else selectedDay == todayDayNumber
+                }
+                val currentHour = remember {
+                    try { java.time.LocalTime.now().hour } catch (_: Throwable) { 12 }
+                }
+                val eventsByHour = remember(dayEvents) {
+                    dayEvents.groupBy { parseHour(it.startTime) ?: 12 }
+                }
+
+                LaunchedEffect(selectedDay, selectedDate) {
+                    val firstEventHour = dayEvents.mapNotNull { parseHour(it.startTime) }.minOrNull()
+                    val target = firstEventHour ?: if (isToday) currentHour else 8
+                    listState.scrollToItem((target - 1).coerceAtLeast(0))
+                }
+
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .testTag("timeline_events_list"),
+                    contentPadding = PaddingValues(vertical = 12.dp, horizontal = 12.dp)
+                ) {
+                    items(24, key = { "hour_$it" }) { h ->
+                        val hourLabel = String.format("%02d:00", h)
+                        val hourEvents = eventsByHour[h].orEmpty()
+                        val hasListeningNow = isToday && isListening && h == currentHour
+                        val hasProcessingNow = isToday && isProcessingSavedListening && h == currentHour
+                        val hasContent = hourEvents.isNotEmpty() || hasListeningNow || hasProcessingNow
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = if (hasContent) 4.dp else 1.dp),
+                            verticalAlignment = Alignment.Top
+                        ) {
+                            // Left Time Axis Column
+                            Column(
+                                modifier = Modifier
+                                    .width(46.dp)
+                                    .padding(end = 8.dp),
+                                horizontalAlignment = Alignment.End
+                            ) {
+                                Text(
+                                    text = hourLabel,
+                                    color = if (hasContent) PrimaryNeonGreen else Color(0xFF434A45),
+                                    fontSize = 11.sp,
+                                    fontWeight = if (hasContent) FontWeight.Bold else FontWeight.Normal
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Box(
+                                    modifier = Modifier
+                                        .width(2.dp)
+                                        .height(if (hasContent) 32.dp else 20.dp)
+                                        .clip(RoundedCornerShape(1.dp))
+                                        .background(if (hasContent) PrimaryNeonGreen.copy(alpha = 0.5f) else Color(0xFF1F2521))
+                                )
                             }
-                        }
-                        if (isProcessingSavedListening) {
-                            item(key = "listening_saved_card") {
-                                ListeningSavedTimelineCard()
-                            }
-                        }
-                        items(dayEvents, key = { it.id }) { event ->
-                            TimelineEventRow(
-                                event = event,
-                                onClick = { onEventClick(event) },
-                                onScatteredClick = {
-                                    if (event.subFragments.isNotEmpty()) {
-                                        onScatteredFragmentsClick(event.subFragments)
+
+                            // Right Content Column
+                            Column(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(start = 2.dp)
+                            ) {
+                                if (!hasContent) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(top = 7.dp, bottom = 12.dp)
+                                            .height(1.dp)
+                                            .background(Color(0xFF1B201D))
+                                    )
+                                } else {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(top = 7.dp, bottom = 8.dp)
+                                            .height(1.dp)
+                                            .background(Color(0xFF293B2F))
+                                    )
+
+                                    if (hasListeningNow) {
+                                        ActiveListeningTimelineCard(onStop = onStopListening)
+                                        Spacer(modifier = Modifier.height(10.dp))
+                                    }
+                                    if (hasProcessingNow) {
+                                        ListeningSavedTimelineCard()
+                                        Spacer(modifier = Modifier.height(10.dp))
+                                    }
+
+                                    hourEvents.forEach { event ->
+                                        TimelineEventCard(
+                                            event = event,
+                                            onClick = { onEventClick(event) },
+                                            onScatteredClick = {
+                                                if (event.subFragments.isNotEmpty()) {
+                                                    onScatteredFragmentsClick(event.subFragments)
+                                                }
+                                            }
+                                        )
+                                        Spacer(modifier = Modifier.height(10.dp))
                                     }
                                 }
-                            )
+                            }
                         }
-                        item {
-                            Spacer(modifier = Modifier.height(72.dp))
-                        }
+                    }
+
+                    item {
+                        Spacer(modifier = Modifier.height(72.dp))
                     }
                 }
 
@@ -439,6 +522,145 @@ private fun CalendarDayCell(
     }
 }
 
+private fun parseHour(timeStr: String): Int? {
+    val part = timeStr.trim().split(":").firstOrNull() ?: return null
+    return part.toIntOrNull()
+}
+
+@Composable
+private fun TimelineEventCard(
+    event: MemoryEvent,
+    onClick: () -> Unit,
+    onScatteredClick: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("event_card_${event.id}")
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .background(SurfaceCardGreen)
+                .border(1.dp, SurfaceCardGreenBorder, RoundedCornerShape(12.dp))
+                .clickable { onClick() }
+                .padding(16.dp)
+        ) {
+            if (event.categoryWatermark.isNotEmpty()) {
+                Text(
+                    text = event.categoryWatermark,
+                    color = Color(0xFF24282C),
+                    fontSize = 26.sp,
+                    fontWeight = FontWeight.Black,
+                    fontStyle = FontStyle.Italic,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .offset(x = 4.dp, y = (-6).dp)
+                )
+            }
+
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    text = "${event.startTime} - ${event.endTime} · ${event.durationLabel}",
+                    color = TextSecondary,
+                    fontSize = 12.sp
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = event.title,
+                    color = TextPrimary,
+                    fontSize = 17.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    lineHeight = 24.sp
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "“${event.summaryOverview}”",
+                    color = TextSecondary,
+                    fontSize = 13.sp,
+                    lineHeight = 20.sp,
+                    maxLines = 4,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    event.speakers.forEach { speaker ->
+                        SpeakerChip(speaker)
+                    }
+                    if (event.unrecognizedVoiceCount > 0) {
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = Color(0xFF2D2619)
+                        ) {
+                            Text(
+                                text = "待确认声音",
+                                color = Color(0xFFE5A93C),
+                                fontSize = 11.sp,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        if (event.subFragments.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(8.dp))
+            ScatteredDialoguesCard(
+                startTime = event.subFragmentsStartTime,
+                endTime = event.subFragmentsEndTime,
+                fragmentsCount = event.subFragments.size,
+                onClick = onScatteredClick
+            )
+        }
+    }
+}
+
+@Composable
+private fun ScatteredDialoguesCard(
+    startTime: String,
+    endTime: String,
+    fragmentsCount: Int,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(SurfaceCardElevated)
+            .border(1.dp, SurfaceCardGreenBorder, RoundedCornerShape(8.dp))
+            .clickable { onClick() }
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(6.dp)
+                .clip(CircleShape)
+                .background(PrimaryNeonGreen)
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(
+            text = "零散对话 ($fragmentsCount 段)",
+            color = TextSecondary,
+            fontSize = 13.sp,
+            modifier = Modifier.weight(1f)
+        )
+        if (startTime.isNotEmpty() && endTime.isNotEmpty()) {
+            Text(
+                text = "$startTime - $endTime",
+                color = TextMuted,
+                fontSize = 11.sp
+            )
+        }
+    }
+}
+
 @Composable
 private fun TimelineEventRow(
     event: MemoryEvent,
@@ -466,13 +688,13 @@ private fun TimelineEventRow(
                     fontSize = 11.sp
                 )
                 Spacer(modifier = Modifier.height(10.dp))
-                // Vertical solid green/dark bar
+                // Vertical solid bar
                 Box(
                     modifier = Modifier
                         .width(3.dp)
                         .height(64.dp)
                         .clip(RoundedCornerShape(2.dp))
-                        .background(Color(0xFF2A4030))
+                        .background(Color(0xFF384048))
                 )
                 Spacer(modifier = Modifier.height(10.dp))
                 Text(
@@ -496,7 +718,7 @@ private fun TimelineEventRow(
                 if (event.categoryWatermark.isNotEmpty()) {
                     Text(
                         text = event.categoryWatermark,
-                        color = Color(0xFF223628),
+                        color = Color(0xFF24282C),
                         fontSize = 26.sp,
                         fontWeight = FontWeight.Black,
                         fontStyle = FontStyle.Italic,
@@ -570,7 +792,7 @@ private fun TimelineEventRow(
                                 .width(3.dp)
                                 .height(10.dp)
                                 .clip(RoundedCornerShape(1.5.dp))
-                                .background(Color(0xFF233629))
+                                .background(DividerDark)
                         )
                     }
                     Spacer(modifier = Modifier.height(6.dp))
@@ -589,8 +811,8 @@ private fun TimelineEventRow(
                         modifier = Modifier
                             .weight(1f)
                             .clip(RoundedCornerShape(8.dp))
-                            .background(Color(0xFF141C16))
-                            .border(1.dp, Color(0xFF1E2D22), RoundedCornerShape(8.dp))
+                            .background(SurfaceCardElevated)
+                            .border(1.dp, SurfaceCardGreenBorder, RoundedCornerShape(8.dp))
                             .clickable { onScatteredClick() }
                             .padding(horizontal = 14.dp, vertical = 8.dp)
                             .testTag("scattered_fragments_${event.id}"),
@@ -605,7 +827,7 @@ private fun TimelineEventRow(
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
                             text = frag.title,
-                            color = Color(0xFF7FA388),
+                            color = TextSecondary,
                             fontSize = 13.sp,
                             modifier = Modifier.weight(1f)
                         )
@@ -620,8 +842,8 @@ private fun TimelineEventRow(
                         modifier = Modifier
                             .weight(1f)
                             .clip(RoundedCornerShape(10.dp))
-                            .background(Color(0xFF141C16))
-                            .border(1.dp, Color(0xFF1E2D22), RoundedCornerShape(10.dp))
+                            .background(SurfaceCardElevated)
+                            .border(1.dp, SurfaceCardGreenBorder, RoundedCornerShape(10.dp))
                             .clickable { onScatteredClick() }
                             .padding(horizontal = 16.dp, vertical = 12.dp)
                             .testTag("scattered_fragments_${event.id}"),
@@ -662,28 +884,15 @@ fun ActiveListeningTimelineCard(
             .padding(vertical = 4.dp),
         verticalAlignment = Alignment.Top
     ) {
-        Column(
-            modifier = Modifier.width(46.dp).padding(end = 6.dp),
-            horizontalAlignment = Alignment.End
-        ) {
-            Text("NOW", color = PrimaryNeonGreen, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-            Spacer(modifier = Modifier.height(6.dp))
-            Box(
-                modifier = Modifier
-                    .width(3.dp)
-                    .height(52.dp)
-                    .clip(RoundedCornerShape(1.5.dp))
-                    .background(PrimaryNeonGreen)
-            )
-        }
         Box(
             modifier = Modifier
-                .weight(1f)
+                .fillMaxWidth()
                 .clip(RoundedCornerShape(12.dp))
                 .background(Color(0xFF14261B))
                 .border(1.5.dp, PrimaryNeonGreen, RoundedCornerShape(12.dp))
                 .clickable { onStop() }
                 .padding(16.dp)
+                .testTag("active_listening_card")
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -732,27 +941,14 @@ fun ListeningSavedTimelineCard() {
             .padding(vertical = 4.dp),
         verticalAlignment = Alignment.Top
     ) {
-        Column(
-            modifier = Modifier.width(46.dp).padding(end = 6.dp),
-            horizontalAlignment = Alignment.End
-        ) {
-            Text("SAVED", color = TextSecondary, fontSize = 10.sp)
-            Spacer(modifier = Modifier.height(6.dp))
-            Box(
-                modifier = Modifier
-                    .width(3.dp)
-                    .height(46.dp)
-                    .clip(RoundedCornerShape(1.5.dp))
-                    .background(DividerDark)
-            )
-        }
         Box(
             modifier = Modifier
-                .weight(1f)
+                .fillMaxWidth()
                 .clip(RoundedCornerShape(12.dp))
                 .background(Color(0xFF171F1A))
                 .border(1.dp, Color(0xFF283B2E), RoundedCornerShape(12.dp))
                 .padding(14.dp)
+                .testTag("listening_saved_card")
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),

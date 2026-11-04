@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -506,112 +507,74 @@ private fun OverviewSubTabContent(
             )
         }
 
-        // 拍板决定 (Decisions)
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Default.CheckCircle, contentDescription = null, tint = PrimaryNeonGreen, modifier = Modifier.size(16.dp))
-                Spacer(modifier = Modifier.width(6.dp))
-                Text("拍板决定 (Decisions)", color = PrimaryNeonGreen, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-            }
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(10.dp),
-                color = Color(0xFF142017),
-                border = BorderStroke(1.dp, Color(0xFF233B2B))
-            ) {
-                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(
-                        text = "• 拍板通过：新架构特性随当前版本上线；离线容错与异常重试机制纳入后续迭代，交付时间表严格维持不变。",
-                        color = TextPrimary,
-                        fontSize = 14.sp,
-                        lineHeight = 22.sp
-                    )
-                    Text(
-                        text = "• 确定采用端云双轨与硬件级 AES-256 安全加密存储策略。",
-                        color = TextSecondary,
-                        fontSize = 13.sp,
-                        lineHeight = 20.sp
-                    )
-                }
-            }
-        }
-
-        // 可执行待办 (Action Items / To-Do)
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Outlined.Checklist, contentDescription = null, tint = TextPrimary, modifier = Modifier.size(16.dp))
-                Spacer(modifier = Modifier.width(6.dp))
-                Text("可执行待办 (Action Items)", color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-            }
-            val todos = listOf(
-                Triple("把 beta 亮点与接入文档同步给团队", "Mike", "周五前"),
-                Triple("准备发布候选构建与签名校验验证", "Alex", "本周三"),
-                Triple("整理 MCP 服务端回归验证清单", "Sam", "待确认")
-            )
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(10.dp),
-                color = Color(0xFF181C19),
-                border = BorderStroke(1.dp, DividerDark)
-            ) {
-                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    todos.forEachIndexed { idx, (task, owner, deadline) ->
-                        val isChecked = todoChecked[idx] == true
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    todoChecked = todoChecked + (idx to !isChecked)
-                                },
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Checkbox(
-                                checked = isChecked,
-                                onCheckedChange = { chk -> todoChecked = todoChecked + (idx to chk) },
-                                colors = CheckboxDefaults.colors(
-                                    checkedColor = PrimaryNeonGreen,
-                                    checkmarkColor = Color.Black,
-                                    uncheckedColor = TextMuted
-                                ),
-                                modifier = Modifier.size(24.dp)
-                            )
-                            Spacer(modifier = Modifier.width(10.dp))
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = task,
-                                    color = if (isChecked) TextMuted else TextPrimary,
-                                    fontSize = 14.sp,
-                                    textDecoration = if (isChecked) TextDecoration.LineThrough else null
-                                )
-                                Spacer(modifier = Modifier.height(2.dp))
-                                Text(
-                                    text = "责任人: $owner · 截止: $deadline",
-                                    color = TextSecondary,
-                                    fontSize = 12.sp
-                                )
-                            }
-                        }
+        // 可执行待办 (仅当从笔记/要点中解析出真实清单时展示)
+        val todos = remember(event) {
+            val parsed = mutableListOf<Triple<String, String, String>>()
+            val text = event.detailedNoteMarkdown
+            text.lines().forEach { rawLine ->
+                val line = rawLine.trim()
+                if (line.startsWith("- [ ]") || line.startsWith("- [x]") || line.startsWith("* [ ]")) {
+                    val task = line.removePrefix("- [ ]").removePrefix("- [x]").removePrefix("* [ ]").trim()
+                    if (task.isNotBlank()) {
+                        parsed.add(Triple(task, event.speakers.firstOrNull() ?: "本人", "待跟进"))
                     }
                 }
             }
+            parsed
         }
 
-        // 未决问题与想法 (Open Questions & Ideas)
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Outlined.Lightbulb, contentDescription = null, tint = Color(0xFFE5B58C), modifier = Modifier.size(16.dp))
-                Spacer(modifier = Modifier.width(6.dp))
-                Text("未决问题与后续想法", color = Color(0xFFE5B58C), fontSize = 13.sp, fontWeight = FontWeight.Bold)
-            }
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(10.dp),
-                color = Color(0xFF1B1917),
-                border = BorderStroke(1.dp, Color(0xFF3B2E24))
-            ) {
-                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("• 考虑后续引入端侧轻量小模型执行预降噪与环境音分类", color = TextSecondary, fontSize = 13.sp)
-                    Text("• 达人电话商务合作场景是否需二次风控确认？", color = TextSecondary, fontSize = 13.sp)
+        if (todos.isNotEmpty()) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Outlined.Checklist, contentDescription = null, tint = TextPrimary, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("可执行待办 (Action Items)", color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                }
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp),
+                    color = SurfaceCardGreen,
+                    border = BorderStroke(1.dp, DividerDark)
+                ) {
+                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        todos.forEachIndexed { idx, (task, owner, deadline) ->
+                            val isChecked = todoChecked[idx] == true
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        todoChecked = todoChecked + (idx to !isChecked)
+                                    },
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Checkbox(
+                                    checked = isChecked,
+                                    onCheckedChange = { chk -> todoChecked = todoChecked + (idx to chk) },
+                                    colors = CheckboxDefaults.colors(
+                                        checkedColor = PrimaryNeonGreen,
+                                        checkmarkColor = Color.Black,
+                                        uncheckedColor = TextMuted
+                                    ),
+                                    modifier = Modifier.size(24.dp)
+                                )
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = task,
+                                        color = if (isChecked) TextMuted else TextPrimary,
+                                        fontSize = 14.sp,
+                                        textDecoration = if (isChecked) TextDecoration.LineThrough else null
+                                    )
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    Text(
+                                        text = "责任人: $owner · 截止: $deadline",
+                                        color = TextSecondary,
+                                        fontSize = 12.sp
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -811,7 +774,7 @@ private fun TranscriptSubTabContent(
                 )
             }
         } else {
-            items(filteredTranscripts, key = { it.id }) { seg ->
+            itemsIndexed(filteredTranscripts, key = { idx, seg -> "seg_${idx}_${seg.id}" }) { _, seg ->
                 val isPlaying = playingSentenceId == seg.id
                 val isUnrecognized = seg.speaker.contains("未识别") || seg.speaker.equals("Unknown", ignoreCase = true)
                 val isLikelyCandidate = seg.speaker.contains("待确认") || seg.speaker.contains("可能是") || seg.speaker.startsWith("spk_")
@@ -820,7 +783,7 @@ private fun TranscriptSubTabContent(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(8.dp))
-                        .background(if (isPlaying) Color(0xFF18261D) else Color.Transparent)
+                        .background(if (isPlaying) SurfaceCardElevated else Color.Transparent)
                         .clickable {
                             val nextId = if (isPlaying) null else seg.id
                             playingSentenceId = nextId
@@ -834,7 +797,7 @@ private fun TranscriptSubTabContent(
                         if (isUnrecognized) {
                             Surface(
                                 shape = RoundedCornerShape(4.dp),
-                                color = Color(0xFF222623)
+                                color = SurfaceCardElevated
                             ) {
                                 Text(
                                     text = "未识别",
@@ -846,7 +809,7 @@ private fun TranscriptSubTabContent(
                         } else if (isLikelyCandidate) {
                             Surface(
                                 shape = RoundedCornerShape(4.dp),
-                                color = Color(0xFF192C1F),
+                                color = TagBg,
                                 border = BorderStroke(1.dp, PrimaryNeonGreen),
                                 modifier = Modifier.clickable { onSpeakerClick(seg.speaker) }
                             ) {
@@ -918,14 +881,28 @@ private fun VoiceSubTabContent(
             .padding(horizontal = 20.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        if (event.unrecognizedVoiceCount > 0 && confirmedCandidate == null) {
-            val candidateName = knownPeople.firstOrNull()?.name ?: "Marco"
+        val candidateSeg = remember(event.transcripts) {
+            event.transcripts.find { it.speaker.contains("可能是") || it.speaker.contains("待确认") }
+        }
+        val candidateName = remember(candidateSeg) {
+            candidateSeg?.let { seg ->
+                if (seg.speaker.contains("可能是")) {
+                    seg.speaker.substringAfter("可能是").substringBefore("·").trim()
+                } else if (seg.speaker.contains("待确认")) {
+                    seg.speaker.substringAfter("待确认").trim()
+                } else {
+                    seg.speaker
+                }
+            }
+        }
+
+        if (candidateName != null && confirmedCandidate == null) {
 
             Surface(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(14.dp),
-                color = Color(0xFF17201A),
-                border = BorderStroke(1.dp, PrimaryNeonGreen.copy(alpha = 0.5f))
+                color = SurfaceCardGreen,
+                border = BorderStroke(1.dp, SurfaceCardGreenBorder)
             ) {
                 Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Row(
@@ -936,40 +913,30 @@ private fun VoiceSubTabContent(
                         Text("关于这位说话人", color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.Bold)
                         Surface(
                             shape = RoundedCornerShape(6.dp),
-                            color = Color(0xFF1D3322),
-                            border = BorderStroke(1.dp, PrimaryNeonGreen)
+                            color = TagBg,
+                            border = BorderStroke(1.dp, SurfaceCardGreenBorder)
                         ) {
                             Text(
-                                text = "疑似度 78%",
-                                color = PrimaryNeonGreen,
+                                text = "待确认发言人",
+                                color = TextSecondary,
                                 fontSize = 11.sp,
                                 modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                             )
                         }
                     }
 
-                    // AI 发言场景侧写
-                    Column {
-                        Text("AI 发言场景侧写：", color = TextMuted, fontSize = 12.sp)
-                        Spacer(modifier = Modifier.height(2.dp))
-                        Text(
-                            text = "多在技术方案评审与商务对齐场景中发言，负责方案细节沟通与架构对齐。",
-                            color = TextSecondary,
-                            fontSize = 13.sp,
-                            lineHeight = 18.sp
-                        )
-                    }
-
-                    // 典型原声文本
-                    Column {
-                        Text("典型发言原声：", color = TextMuted, fontSize = 12.sp)
-                        Spacer(modifier = Modifier.height(2.dp))
-                        Text(
-                            text = "“200ms 延迟那个方案，我又想了想，还是行不通……”",
-                            color = TextPrimary,
-                            fontSize = 14.sp,
-                            fontStyle = FontStyle.Italic
-                        )
+                    // 典型发言原声
+                    if (candidateSeg != null && candidateSeg.text.isNotBlank()) {
+                        Column {
+                            Text("典型发言原声：", color = TextMuted, fontSize = 12.sp)
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "“${candidateSeg.text}”",
+                                color = TextPrimary,
+                                fontSize = 14.sp,
+                                fontStyle = FontStyle.Italic
+                            )
+                        }
                     }
 
                     // 音频试听控制条
@@ -977,7 +944,7 @@ private fun VoiceSubTabContent(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(8.dp))
-                            .background(Color(0xFF202B23))
+                            .background(SurfaceCardElevated)
                             .clickable { isPlayingVoice = !isPlayingVoice }
                             .padding(horizontal = 12.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -997,7 +964,9 @@ private fun VoiceSubTabContent(
                                 fontSize = 13.sp
                             )
                         }
-                        Text("10:31 · 听到 4 次", color = TextMuted, fontSize = 12.sp)
+                        if (candidateSeg != null) {
+                            Text(candidateSeg.time, color = TextMuted, fontSize = 12.sp)
+                        }
                     }
 
                     // 三项操作按钮
@@ -1013,7 +982,7 @@ private fun VoiceSubTabContent(
                             colors = ButtonDefaults.buttonColors(containerColor = PrimaryNeonGreen),
                             modifier = Modifier.weight(1.3f)
                         ) {
-                            Text("对，是 $candidateName 78%", color = Color.Black, fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                            Text("对，是 $candidateName", color = Color.Black, fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1)
                         }
                         OutlinedButton(
                             onClick = {
@@ -1033,6 +1002,18 @@ private fun VoiceSubTabContent(
                             Text("忽略", color = TextMuted, fontSize = 12.sp)
                         }
                     }
+                }
+            }
+        } else if (event.unrecognizedVoiceCount > 0 && confirmedCandidate == null) {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(14.dp),
+                color = SurfaceCardGreen,
+                border = BorderStroke(1.dp, DividerDark)
+            ) {
+                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("未识别声音 (${event.unrecognizedVoiceCount})", color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                    Text("本录音中存在未识别的说话人声音片段，可在逐字稿中点击发言人标签手动指定，或前往「待识别声音」批量处理。", color = TextSecondary, fontSize = 13.sp)
                 }
             }
         }
@@ -1132,7 +1113,7 @@ fun AiNoteChatScreen(
                     contentAlignment = Alignment.CenterEnd
                 ) {
                     Surface(
-                        color = Color(0xFF213C24),
+                        color = SurfaceCardElevated,
                         shape = RoundedCornerShape(16.dp),
                         modifier = Modifier.widthIn(max = 310.dp)
                     ) {
@@ -1150,7 +1131,7 @@ fun AiNoteChatScreen(
             // Tool Execution Pill
             item {
                 Surface(
-                    color = Color(0xFF1A1E1B),
+                    color = SurfaceCardGreen,
                     shape = RoundedCornerShape(10.dp)
                 ) {
                     Text(
@@ -1184,7 +1165,7 @@ fun AiNoteChatScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(14.dp))
-                        .background(Color(0xFF171B18))
+                        .background(SurfaceCardGreen)
                         .padding(16.dp)
                 ) {
                     Text(
@@ -1205,13 +1186,13 @@ fun AiNoteChatScreen(
                 }
             }
 
-            items(extraMessages) { msg ->
+            itemsIndexed(extraMessages, key = { idx, _ -> "extra_msg_$idx" }) { _, msg ->
                 Box(
                     modifier = Modifier.fillMaxWidth(),
                     contentAlignment = Alignment.CenterEnd
                 ) {
                     Surface(
-                        color = Color(0xFF213C24),
+                        color = SurfaceCardElevated,
                         shape = RoundedCornerShape(16.dp)
                     ) {
                         Text(

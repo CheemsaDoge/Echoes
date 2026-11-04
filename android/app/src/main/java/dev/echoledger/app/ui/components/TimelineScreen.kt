@@ -136,6 +136,8 @@ fun TimelineScreen(
     isCalendarExpanded: Boolean,
     onToggleCalendarExpanded: () -> Unit,
     events: List<MemoryEvent>,
+    selectedDate: java.time.LocalDate? = null,
+    onSelectDate: ((java.time.LocalDate) -> Unit)? = null,
     isListening: Boolean = false,
     isProcessingSavedListening: Boolean = false,
     onStopListening: () -> Unit = {},
@@ -144,8 +146,16 @@ fun TimelineScreen(
     onUpgradeClick: () -> Unit,
     onQuickAiClick: () -> Unit
 ) {
-    val dayEvents = remember(selectedDay, events) {
-        events.filter { it.dayNumber == selectedDay }
+    val dayEvents = remember(selectedDate, selectedDay, events) {
+        if (selectedDate != null) {
+            val targetDateIso = selectedDate.toString()
+            events.filter { ev ->
+                if (ev.dateIso.isNotBlank()) ev.dateIso == targetDateIso
+                else ev.dayNumber == selectedDate.dayOfMonth
+            }
+        } else {
+            events.filter { it.dayNumber == selectedDay }
+        }
     }
 
     val today = remember {
@@ -156,22 +166,28 @@ fun TimelineScreen(
         }
     }
     val todayDayNumber = today?.dayOfMonth ?: 3
-    val monthLabel = remember(today) {
-        if (today != null) {
-            val m = today.monthValue
-            "${today.year} / ${if (m < 10) "0$m" else "$m"}"
+    val monthLabel = remember(selectedDate, today) {
+        val target = selectedDate ?: today
+        if (target != null) {
+            val m = target.monthValue
+            "${target.year} / ${if (m < 10) "0$m" else "$m"}"
         } else {
             "2026 / 10"
         }
     }
-    val calendarDays = remember(today, events) {
+    val calendarDays = remember(today, selectedDate, events) {
         if (today != null) {
-            val dayOfWeek = today.dayOfWeek.value
-            val monday = today.minusDays((dayOfWeek - 1).toLong())
+            val baseDate = selectedDate ?: today
+            val dayOfWeek = baseDate.dayOfWeek.value
+            val monday = baseDate.minusDays((dayOfWeek - 1).toLong())
             val dayLabels = listOf("一", "二", "三", "四", "五", "六", "日")
             (0..6).map { idx ->
                 val d = monday.plusDays(idx.toLong())
-                val count = events.count { it.dayNumber == d.dayOfMonth }
+                val dIso = d.toString()
+                val count = events.count { ev ->
+                    if (ev.dateIso.isNotBlank()) ev.dateIso == dIso
+                    else ev.dayNumber == d.dayOfMonth
+                }
                 CalendarDayItem(dayLabels[idx], d.dayOfMonth, count)
             }
         } else {
@@ -333,6 +349,12 @@ fun TimelineScreen(
                         selectedDay = selectedDay,
                         monthLabel = monthLabel,
                         todayDayNumber = todayDayNumber,
+                        selectedDate = selectedDate,
+                        onSelectDate = { date ->
+                            onSelectDate?.invoke(date)
+                            onSelectDay(date.dayOfMonth)
+                            onToggleCalendarExpanded()
+                        },
                         onSelectDay = {
                             onSelectDay(it)
                             onToggleCalendarExpanded()
@@ -828,14 +850,61 @@ private fun EmptyDayTimelineView() {
     }
 }
 
+private data class CalendarMonthCell(
+    val dayNumber: Int,
+    val date: java.time.LocalDate,
+    val isCurrentMonth: Boolean
+)
+
 @Composable
 private fun MonthCalendarSheet(
     selectedDay: Int,
     monthLabel: String,
     todayDayNumber: Int,
+    selectedDate: java.time.LocalDate? = null,
+    onSelectDate: ((java.time.LocalDate) -> Unit)? = null,
     onSelectDay: (Int) -> Unit,
     onClose: () -> Unit
 ) {
+    var displayYearMonth by remember {
+        mutableStateOf(
+            selectedDate?.let { java.time.YearMonth.from(it) }
+                ?: try {
+                    java.time.YearMonth.now()
+                } catch (_: Throwable) {
+                    java.time.YearMonth.of(2026, 11)
+                }
+        )
+    }
+
+    val dynamicMonthLabel = remember(displayYearMonth) {
+        val m = displayYearMonth.monthValue
+        "${displayYearMonth.year} / ${if (m < 10) "0$m" else "$m"}"
+    }
+
+    val weeks = remember(displayYearMonth) {
+        val firstDay = displayYearMonth.atDay(1)
+        val startDow = firstDay.dayOfWeek.value % 7 // 0 = Sunday, 1 = Monday ...
+        val daysInMonth = displayYearMonth.lengthOfMonth()
+        val prevMonth = displayYearMonth.minusMonths(1)
+        val daysInPrevMonth = prevMonth.lengthOfMonth()
+
+        val list = mutableListOf<CalendarMonthCell>()
+        for (i in (startDow - 1) downTo 0) {
+            val d = daysInPrevMonth - i
+            list.add(CalendarMonthCell(d, prevMonth.atDay(d), isCurrentMonth = false))
+        }
+        for (d in 1..daysInMonth) {
+            list.add(CalendarMonthCell(d, displayYearMonth.atDay(d), isCurrentMonth = true))
+        }
+        val remaining = (7 - (list.size % 7)) % 7
+        val nextMonth = displayYearMonth.plusMonths(1)
+        for (d in 1..remaining) {
+            list.add(CalendarMonthCell(d, nextMonth.atDay(d), isCurrentMonth = false))
+        }
+        list.chunked(7)
+    }
+
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
@@ -863,7 +932,7 @@ private fun MonthCalendarSheet(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = monthLabel,
+                    text = dynamicMonthLabel,
                     color = TextPrimary,
                     fontSize = 16.sp,
                     fontWeight = FontWeight.SemiBold
@@ -874,17 +943,32 @@ private fun MonthCalendarSheet(
                         color = TextSecondary,
                         fontSize = 14.sp,
                         modifier = Modifier
-                            .clickable { onSelectDay(todayDayNumber) }
+                            .clickable {
+                                val today = try { java.time.LocalDate.now() } catch (_: Throwable) { null }
+                                if (today != null) {
+                                    displayYearMonth = java.time.YearMonth.from(today)
+                                    onSelectDate?.invoke(today)
+                                    onSelectDay(today.dayOfMonth)
+                                } else {
+                                    onSelectDay(todayDayNumber)
+                                }
+                            }
                             .padding(horizontal = 8.dp, vertical = 4.dp)
                     )
-                    IconButton(onClick = onClose, modifier = Modifier.size(32.dp)) {
+                    IconButton(
+                        onClick = { displayYearMonth = displayYearMonth.minusMonths(1) },
+                        modifier = Modifier.size(32.dp)
+                    ) {
                         Icon(
                             imageVector = Icons.AutoMirrored.Filled.KeyboardArrowLeft,
                             contentDescription = "上一月",
                             tint = TextSecondary
                         )
                     }
-                    IconButton(onClick = onClose, modifier = Modifier.size(32.dp)) {
+                    IconButton(
+                        onClick = { displayYearMonth = displayYearMonth.plusMonths(1) },
+                        modifier = Modifier.size(32.dp)
+                    ) {
                         Icon(
                             imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
                             contentDescription = "下一月",
@@ -904,32 +988,37 @@ private fun MonthCalendarSheet(
                 }
             }
             Spacer(modifier = Modifier.height(12.dp))
-            val weeks = listOf(
-                listOf(27, 28, 29, 30, 1, 2, 3),
-                listOf(4, 5, 6, 7, 8, 9, 10),
-                listOf(11, 12, 13, 14, 15, 16, 17),
-                listOf(18, 19, 20, 21, 22, 23, 24)
-            )
             weeks.forEach { week ->
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(vertical = 8.dp),
+                        .padding(vertical = 6.dp),
                     horizontalArrangement = Arrangement.SpaceAround
                 ) {
-                    week.forEach { d ->
-                        val isSelected = d == selectedDay
+                    week.forEach { cell ->
+                        val isSelected = if (selectedDate != null) {
+                            cell.date == selectedDate
+                        } else {
+                            cell.isCurrentMonth && cell.dayNumber == selectedDay
+                        }
                         Box(
                             modifier = Modifier
                                 .size(36.dp)
                                 .clip(RoundedCornerShape(8.dp))
                                 .background(if (isSelected) PrimaryNeonGreen.copy(alpha = 0.2f) else Color.Transparent)
-                                .clickable { onSelectDay(d) },
+                                .clickable {
+                                    onSelectDate?.invoke(cell.date)
+                                    onSelectDay(cell.dayNumber)
+                                },
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
-                                text = d.toString(),
-                                color = if (isSelected) PrimaryNeonGreen else TextPrimary,
+                                text = cell.dayNumber.toString(),
+                                color = when {
+                                    isSelected -> PrimaryNeonGreen
+                                    !cell.isCurrentMonth -> TextMuted.copy(alpha = 0.4f)
+                                    else -> TextPrimary
+                                },
                                 fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
                                 fontSize = 15.sp
                             )

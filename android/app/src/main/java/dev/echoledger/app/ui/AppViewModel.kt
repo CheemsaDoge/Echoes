@@ -325,7 +325,7 @@ class AppViewModel @JvmOverloads constructor(
             val json = runCatching { JSONObject(entry.payload) }.getOrNull()
             if (json != null) {
                 json.put("title", newTitle)
-                repo.dao.putCache(listOf(dev.echoledger.app.data.CacheEntry("events", eventId, 0, 0, json.toString())))
+                repo.dao.putCache(listOf(entry.copy(payload = json.toString())))
             }
         }
         if (repo.prefs.operationMode != "standalone" && repo.prefs.token.isNotBlank()) {

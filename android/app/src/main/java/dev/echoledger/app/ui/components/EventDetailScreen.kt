@@ -60,6 +60,7 @@ fun EventDetailScreen(
     onOpenUnrecognizedVoices: () -> Unit = {},
     onDeleteEvent: ((MemoryEvent) -> Unit)? = null,
     onRenameEvent: ((String) -> Unit)? = null,
+    onPlayChunk: ((String) -> Unit)? = null,
     onReassignSpeaker: (oldName: String, newName: String) -> Unit
 ) {
     BackHandler(onBack = onBack)
@@ -251,6 +252,7 @@ fun EventDetailScreen(
                         lazyListState = transcriptLazyState,
                         searchQuery = searchQuery,
                         onSearchQueryChange = { searchQuery = it },
+                        onPlayChunk = onPlayChunk,
                         onSpeakerClick = { speaker -> editingSpeakerName = speaker }
                     )
                     2 -> VoiceSubTabContent(
@@ -718,6 +720,7 @@ private fun TranscriptSubTabContent(
     lazyListState: LazyListState,
     searchQuery: String,
     onSearchQueryChange: (String) -> Unit,
+    onPlayChunk: ((String) -> Unit)? = null,
     onSpeakerClick: (String) -> Unit
 ) {
     var playingSentenceId by remember { mutableStateOf<String?>(null) }
@@ -819,7 +822,11 @@ private fun TranscriptSubTabContent(
                         .clip(RoundedCornerShape(8.dp))
                         .background(if (isPlaying) Color(0xFF18261D) else Color.Transparent)
                         .clickable {
-                            playingSentenceId = if (isPlaying) null else seg.id
+                            val nextId = if (isPlaying) null else seg.id
+                            playingSentenceId = nextId
+                            if (nextId != null) {
+                                onPlayChunk?.invoke(seg.id)
+                            }
                         }
                         .padding(horizontal = 6.dp, vertical = 6.dp)
                 ) {

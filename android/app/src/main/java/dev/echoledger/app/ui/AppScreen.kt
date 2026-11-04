@@ -49,7 +49,8 @@ fun AppScreen(
     val clipboardManager = androidx.compose.ui.platform.LocalClipboardManager.current
 
     var currentTab by remember { mutableStateOf(MainBottomTab.TIMELINE) }
-    var selectedDay by remember { mutableIntStateOf(LocalDate.now().dayOfMonth) }
+    val selectedDate by vm.day.collectAsStateWithLifecycle()
+    var selectedDay by remember(selectedDate) { mutableIntStateOf(selectedDate.dayOfMonth) }
     var isCalendarExpanded by remember { mutableStateOf(false) }
 
     // Convert raw backend events / people to UI models
@@ -212,8 +213,15 @@ fun AppScreen(
                     when (currentTab) {
                         MainBottomTab.TIMELINE -> TimelineScreen(
                             selectedDay = selectedDay,
+                            selectedDate = selectedDate,
+                            onSelectDate = { date ->
+                                selectedDay = date.dayOfMonth
+                                vm.selectDay(date)
+                            },
                             onSelectDay = { dayNum ->
                                 selectedDay = dayNum
+                                val target = runCatching { selectedDate.withDayOfMonth(dayNum) }.getOrNull()
+                                if (target != null) vm.selectDay(target)
                                 if (dayNum == 2 || dayNum == 3 || dayNum == LocalDate.now().dayOfMonth) {
                                     toastMessage = "已是最新的"
                                 }
@@ -335,6 +343,9 @@ fun AppScreen(
                             toastMessage = "已修改标题为「$newTitle」"
                         }
                     },
+                    onPlayChunk = { chunkId ->
+                        vm.playChunk(chunkId)
+                    },
                     onReassignSpeaker = { oldName, newName ->
                         val updatedEvent = activeEventDetail!!.copy(
                             speakers = activeEventDetail!!.speakers.map { if (it == oldName) newName else it },
@@ -344,6 +355,7 @@ fun AppScreen(
                         )
                         activeEventDetail = updatedEvent
                         events = events.map { if (it.id == updatedEvent.id) updatedEvent else it }
+                        vm.renameSpeaker(oldName, newName)
                         if (people.none { it.name == newName }) {
                             people = listOf(PersonVoiceProfile(newName, 1)) + people
                             vm.addSpeaker(newName)

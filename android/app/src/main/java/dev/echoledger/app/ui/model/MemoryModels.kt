@@ -24,6 +24,7 @@ data class SubFragmentItem(
 data class MemoryEvent(
     val id: String,
     val dayNumber: Int, // 2 = Nov 2, 3 = Nov 3, 30 = Oct 30
+    val dateIso: String = "", // e.g. "2026-11-04"
     val dayGroupLabel: String, // "昨天", "前天", "10月30日 周五"
     val datePrefixForPerson: String, // "昨天", "2026/11/02", "2026/10/30"
     val fullDateLabel: String,
@@ -783,6 +784,7 @@ fun jsonToMemoryEvent(json: org.json.JSONObject): MemoryEvent {
     return MemoryEvent(
         id = json.optString("id"),
         dayNumber = dayNumber,
+        dateIso = eventDate.toString(),
         dayGroupLabel = dayGroupLabel,
         datePrefixForPerson = datePrefix,
         fullDateLabel = fullDateLabel,

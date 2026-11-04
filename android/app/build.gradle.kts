@@ -66,6 +66,8 @@ fun nonBlankEnvOrProp(vararg keys: String): String? {
     for (key in keys) {
         val envVal = System.getenv(key)?.takeIf { it.isNotBlank() }
         if (envVal != null) return envVal
+    }
+    for (key in keys) {
         val propVal = (project.findProperty(key) as? String)?.takeIf { it.isNotBlank() }
         if (propVal != null) return propVal
     }

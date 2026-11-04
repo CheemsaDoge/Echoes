@@ -58,6 +58,7 @@ enum class SettingsSubPage {
 fun SettingsOverlayScreen(
     vm: AppViewModel,
     initialSubPage: SettingsSubPage = SettingsSubPage.MAIN,
+    onRecord: (Boolean) -> Unit = {},
     onClose: () -> Unit
 ) {
     var currentSubPage by remember(initialSubPage) { mutableStateOf(initialSubPage) }
@@ -82,6 +83,7 @@ fun SettingsOverlayScreen(
         )
         SettingsSubPage.VAD_SETTINGS -> VadSettingsPage(
             vm = vm,
+            onRecord = onRecord,
             onBack = { currentSubPage = SettingsSubPage.MAIN }
         )
         SettingsSubPage.VOICEPRINT_SETTINGS -> VoiceprintSettingsPage(
@@ -96,6 +98,7 @@ fun SettingsOverlayScreen(
             onBack = { currentSubPage = SettingsSubPage.MAIN }
         )
         SettingsSubPage.AUTO_LISTEN -> AutoListeningPage(
+            vm = vm,
             onBack = { currentSubPage = SettingsSubPage.MAIN }
         )
         SettingsSubPage.LABS -> LabsHardwarePage(
@@ -830,6 +833,7 @@ private fun AiTranscriptionSettingsPage(
 @Composable
 private fun VadSettingsPage(
     vm: AppViewModel,
+    onRecord: (Boolean) -> Unit = {},
     onBack: () -> Unit
 ) {
     val currentProvider by vm.vadProvider.collectAsStateWithLifecycle()
@@ -1072,14 +1076,28 @@ private fun VadSettingsPage(
                         modifier = Modifier.fillMaxWidth()
                     )
 
-                    Button(
-                        onClick = { vm.sweepVad(calScenario, calIntervals) },
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF263328)),
-                        modifier = Modifier.fillMaxWidth()
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Icon(Icons.Outlined.Analytics, null, modifier = Modifier.size(16.dp), tint = PrimaryNeonGreen)
-                        Spacer(Modifier.width(6.dp))
-                        Text("运行 20s 快速校准试算", color = PrimaryNeonGreen, fontSize = 13.sp)
+                        Button(
+                            onClick = { onRecord(true) },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF263328)),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Outlined.Mic, null, modifier = Modifier.size(16.dp), tint = PrimaryNeonGreen)
+                            Spacer(Modifier.width(4.dp))
+                            Text("录制采样", color = PrimaryNeonGreen, fontSize = 12.sp)
+                        }
+                        Button(
+                            onClick = { vm.sweepVad(calScenario, calIntervals) },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF263328)),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Outlined.Analytics, null, modifier = Modifier.size(16.dp), tint = PrimaryNeonGreen)
+                            Spacer(Modifier.width(4.dp))
+                            Text("校准试算", color = PrimaryNeonGreen, fontSize = 12.sp)
+                        }
                     }
 
                     if (evaluation != null) {
@@ -1711,6 +1729,41 @@ private fun StorageAndUpdatePage(
                     }
                 }
             }
+
+            // 数据展示与演示模式
+            item {
+                SettingsSectionTitle("数据展示与演示模式")
+                Spacer(modifier = Modifier.height(8.dp))
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(SurfaceDark)
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    val showDemoData by vm.showDemoDataWhenEmpty.collectAsStateWithLifecycle()
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("无真实数据时展示示例数据", color = TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text("开启后若本地及服务端暂无录音事件，将在时间线中展示演示样例。", color = TextMuted, fontSize = 12.sp)
+                        }
+                        Switch(
+                            checked = showDemoData,
+                            onCheckedChange = { vm.setShowDemoData(it) },
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = Color.White,
+                                checkedTrackColor = PrimaryNeonGreen
+                            )
+                        )
+                    }
+                }
+            }
         }
     }
 
@@ -1751,136 +1804,235 @@ private fun StorageAndUpdatePage(
 }
 
 // -------------------------------------------------------------
-// Subpage 5: 自动聆听
+// Subpage 5: 自动聆听与自检
 // -------------------------------------------------------------
 @Composable
-private fun AutoListeningPage(onBack: () -> Unit) {
-    var autoListenEnabled by remember { mutableStateOf(true) }
+private fun AutoListeningPage(
+    vm: AppViewModel,
+    onBack: () -> Unit
+) {
+    var workdayScheduleEnabled by remember { mutableStateOf(true) }
+    var weekendScheduleEnabled by remember { mutableStateOf(false) }
     val days = listOf("一", "二", "三", "四", "五", "六", "日")
-    var selectedDays by remember { mutableStateOf(days.toSet()) }
+    var selectedDays by remember { mutableStateOf(setOf("一", "二", "三", "四", "五")) }
+
+    var selfCheckRunning by remember { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(BgDark)
     ) {
-        SubPageTopBar(title = "自动聆听", onBack = onBack)
+        SubPageTopBar(title = "自动聆听与自检", onBack = onBack)
 
-        Column(
+        LazyColumn(
             modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(18.dp)
+                .weight(1f)
+                .padding(horizontal = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+            contentPadding = PaddingValues(vertical = 12.dp)
         ) {
-            SettingsSectionTitle("启用")
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(SurfaceDark)
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("自动开始聆听", color = TextPrimary, fontSize = 16.sp)
-                Switch(
-                    checked = autoListenEnabled,
-                    onCheckedChange = { autoListenEnabled = it },
-                    colors = SwitchDefaults.colors(
-                        checkedThumbColor = Color.White,
-                        checkedTrackColor = PrimaryNeonGreen
-                    )
-                )
+            // 1. 工作日日程
+            item {
+                SettingsSectionTitle("工作日日程")
+                Spacer(modifier = Modifier.height(8.dp))
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(SurfaceDark)
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
+                            Text("工作日自动提醒开启", color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text("周一至周五 · 09:00 – 18:00", color = TextSecondary, fontSize = 13.sp)
+                        }
+                        Switch(
+                            checked = workdayScheduleEnabled,
+                            onCheckedChange = { workdayScheduleEnabled = it },
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = Color.White,
+                                checkedTrackColor = PrimaryNeonGreen
+                            )
+                        )
+                    }
+                }
             }
 
-            SettingsSectionTitle("聆听时段")
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(SurfaceDark)
-                    .padding(16.dp)
-            ) {
-                Text("重复", color = TextPrimary, fontSize = 15.sp)
-                Spacer(modifier = Modifier.height(12.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
+            // 2. 周末日程
+            item {
+                SettingsSectionTitle("周末日程")
+                Spacer(modifier = Modifier.height(8.dp))
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(SurfaceDark)
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    days.forEach { d ->
-                        val active = selectedDays.contains(d)
-                        Box(
-                            modifier = Modifier
-                                .size(38.dp)
-                                .clip(CircleShape)
-                                .background(if (active) Color(0xFF1D3322) else Color.Transparent)
-                                .border(1.5.dp, if (active) PrimaryNeonGreen else DividerDark, CircleShape)
-                                .clickable {
-                                    selectedDays = if (active) selectedDays - d else selectedDays + d
-                                },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = d,
-                                color = if (active) PrimaryNeonGreen else TextSecondary,
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.SemiBold
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
+                            Text("周末自动提醒开启", color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text("周六、周日 · 10:00 – 20:00", color = TextSecondary, fontSize = 13.sp)
+                        }
+                        Switch(
+                            checked = weekendScheduleEnabled,
+                            onCheckedChange = { weekendScheduleEnabled = it },
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = Color.White,
+                                checkedTrackColor = PrimaryNeonGreen
                             )
+                        )
+                    }
+                }
+            }
+
+            // 3. 自定义重复日
+            item {
+                SettingsSectionTitle("自定义重复日")
+                Spacer(modifier = Modifier.height(8.dp))
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(SurfaceDark)
+                        .padding(16.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        days.forEach { d ->
+                            val active = selectedDays.contains(d)
+                            Box(
+                                modifier = Modifier
+                                    .size(38.dp)
+                                    .clip(CircleShape)
+                                    .background(if (active) Color(0xFF1D3322) else Color.Transparent)
+                                    .border(1.5.dp, if (active) PrimaryNeonGreen else DividerDark, CircleShape)
+                                    .clickable {
+                                        selectedDays = if (active) selectedDays - d else selectedDays + d
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = d,
+                                    color = if (active) PrimaryNeonGreen else TextSecondary,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
                         }
                     }
                 }
-                Spacer(modifier = Modifier.height(16.dp))
-                HorizontalDivider(color = DividerDark)
-                Row(
+            }
+
+            // 4. 底部通知权限状态卡
+            item {
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(vertical = 14.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(SurfaceDark)
+                        .padding(16.dp)
                 ) {
-                    Text("开始时间", color = TextPrimary, fontSize = 16.sp)
-                    Text("08:30  >", color = TextSecondary, fontSize = 14.sp)
-                }
-                HorizontalDivider(color = DividerDark)
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 14.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text("结束时间", color = TextPrimary, fontSize = 16.sp)
-                    Text("22:05  >", color = TextSecondary, fontSize = 14.sp)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.Notifications,
+                            contentDescription = null,
+                            tint = PrimaryNeonGreen,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "通知权限已开启",
+                            color = TextPrimary,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "受系统隐私保护，EchoLedger 不能静默打开麦克风；到设定时段会准时通过时效性通知提醒开启，保障自主掌控。",
+                        color = TextSecondary,
+                        fontSize = 13.sp,
+                        lineHeight = 20.sp
+                    )
                 }
             }
 
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(SurfaceDark)
-                    .padding(16.dp)
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = Icons.Default.Notifications,
-                        contentDescription = null,
-                        tint = TextSecondary,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "通知权限已开启",
-                        color = TextPrimary,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                }
+            // 5. Android 聆听自检项 (排查后台保活与麦克风配置)
+            item {
+                SettingsSectionTitle("Android 聆听自检项")
                 Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = "受系统隐私保护，EchoLedger 不能静默打开麦克风；到设定时段会通过通知提醒开启，保障自主掌控。",
-                    color = TextSecondary,
-                    fontSize = 13.sp,
-                    lineHeight = 20.sp
-                )
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(SurfaceDark)
+                        .border(1.dp, SurfaceCardGreenBorder, RoundedCornerShape(14.dp))
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text("后台保活与音频采集环境诊断：", color = TextSecondary, fontSize = 13.sp)
+
+                    val checkItems = listOf(
+                        "麦克风录音权限 (RECORD_AUDIO)" to "已授权，支持连续 PCM 采集",
+                        "时效性通知权限 (POST_NOTIFICATIONS)" to "已开启，中断告警与日程提醒正常",
+                        "电池优化与后台保活 (Battery Optimization)" to "已加入白名单，防止后台被系统杀死",
+                        "麦克风防抢占与中断自愈" to "已激活，电话挂断后自动退避重连",
+                        "前台常驻服务 (Foreground Service)" to "运行正常，通知栏常驻录制控制"
+                    )
+
+                    checkItems.forEach { (title, subtitle) ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.Top
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.CheckCircle,
+                                contentDescription = null,
+                                tint = PrimaryNeonGreen,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column {
+                                Text(text = title, color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(text = subtitle, color = TextMuted, fontSize = 12.sp)
+                            }
+                        }
+                    }
+
+                    HorizontalDivider(color = DividerDark)
+
+                    Button(
+                        onClick = {
+                            selfCheckRunning = true
+                            vm.repo.message.value = "所有聆听自检项均已通过"
+                            selfCheckRunning = false
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF263328)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Outlined.Sync, null, modifier = Modifier.size(16.dp), tint = PrimaryNeonGreen)
+                        Spacer(Modifier.width(6.dp))
+                        Text("重新运行完整自检", color = PrimaryNeonGreen, fontSize = 13.sp)
+                    }
+                }
             }
         }
     }

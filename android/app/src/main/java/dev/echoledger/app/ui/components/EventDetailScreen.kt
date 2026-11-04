@@ -1,24 +1,37 @@
 package dev.echoledger.app.ui.components
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.ArrowUpward
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.outlined.AutoAwesome
+import androidx.compose.material.icons.outlined.Checklist
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.Description
+import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.Lightbulb
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -26,7 +39,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -43,6 +58,8 @@ fun EventDetailScreen(
     onOpenAiNote: (MemoryEvent) -> Unit,
     onSwitchToAgentTab: () -> Unit,
     onOpenUnrecognizedVoices: () -> Unit = {},
+    onDeleteEvent: ((MemoryEvent) -> Unit)? = null,
+    onRenameEvent: ((String) -> Unit)? = null,
     onReassignSpeaker: (oldName: String, newName: String) -> Unit
 ) {
     BackHandler(onBack = onBack)
@@ -52,6 +69,14 @@ fun EventDetailScreen(
     var followUpInput by remember { mutableStateOf("") }
     var editingSpeakerName by remember { mutableStateOf<String?>(null) }
     var customNewSpeakerInput by remember { mutableStateOf("") }
+    var showDeleteDialog by remember { mutableStateOf(false) }
+
+    val overviewScrollState = rememberScrollState()
+    val transcriptLazyState = rememberLazyListState()
+    val voiceprintsScrollState = rememberScrollState()
+
+    var isEditingTitle by remember { mutableStateOf(false) }
+    var currentTitle by remember(event.title) { mutableStateOf(event.title) }
 
     Box(
         modifier = Modifier
@@ -79,7 +104,7 @@ fun EventDetailScreen(
                 }
 
                 IconButton(
-                    onClick = onBack,
+                    onClick = { showDeleteDialog = true },
                     modifier = Modifier.testTag("detail_delete_button")
                 ) {
                     Icon(
@@ -96,13 +121,56 @@ fun EventDetailScreen(
                     .fillMaxWidth()
                     .padding(horizontal = 20.dp)
             ) {
-                Text(
-                    text = event.title,
-                    color = TextPrimary,
-                    fontSize = 21.sp,
-                    fontWeight = FontWeight.Bold,
-                    lineHeight = 29.sp
-                )
+                if (isEditingTitle) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedTextField(
+                            value = currentTitle,
+                            onValueChange = { currentTitle = it },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = PrimaryNeonGreen,
+                                unfocusedBorderColor = DividerDark,
+                                focusedTextColor = TextPrimary,
+                                unfocusedTextColor = TextPrimary
+                            )
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        IconButton(
+                            onClick = {
+                                isEditingTitle = false
+                                if (currentTitle.isNotBlank() && currentTitle != event.title) {
+                                    onRenameEvent?.invoke(currentTitle.trim())
+                                }
+                            }
+                        ) {
+                            Icon(Icons.Default.Check, "保存标题", tint = PrimaryNeonGreen)
+                        }
+                    }
+                } else {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { isEditingTitle = true },
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = event.title,
+                            color = TextPrimary,
+                            fontSize = 21.sp,
+                            fontWeight = FontWeight.Bold,
+                            lineHeight = 29.sp,
+                            modifier = Modifier.weight(1f)
+                        )
+                        IconButton(onClick = { isEditingTitle = true }, modifier = Modifier.size(32.dp)) {
+                            Icon(Icons.Outlined.Edit, "编辑标题", tint = TextMuted, modifier = Modifier.size(16.dp))
+                        }
+                    }
+                }
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
                     text = event.fullDateLabel,
@@ -174,16 +242,25 @@ fun EventDetailScreen(
                 when (selectedSubTab) {
                     0 -> OverviewSubTabContent(
                         event = event,
+                        scrollState = overviewScrollState,
                         onGenerateDetailedNote = { onOpenAiNote(event) },
                         onUseAgent = onSwitchToAgentTab
                     )
                     1 -> TranscriptSubTabContent(
                         event = event,
+                        lazyListState = transcriptLazyState,
                         searchQuery = searchQuery,
                         onSearchQueryChange = { searchQuery = it },
                         onSpeakerClick = { speaker -> editingSpeakerName = speaker }
                     )
-                    2 -> VoiceSubTabContent()
+                    2 -> VoiceSubTabContent(
+                        event = event,
+                        knownPeople = knownPeople,
+                        scrollState = voiceprintsScrollState,
+                        onConfirmSpeaker = { oldSpk, newSpk ->
+                            onReassignSpeaker(oldSpk, newSpk)
+                        }
+                    )
                 }
             }
 
@@ -347,6 +424,31 @@ fun EventDetailScreen(
                 }
             }
         }
+
+        if (showDeleteDialog) {
+            AlertDialog(
+                onDismissRequest = { showDeleteDialog = false },
+                containerColor = Color(0xFF1A1E1B),
+                title = { Text("删除该记录？", color = TextPrimary, fontWeight = FontWeight.Bold) },
+                text = { Text("将永久移除该事件记录及其转写内容。", color = TextSecondary) },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            showDeleteDialog = false
+                            onDeleteEvent?.invoke(event)
+                            onBack()
+                        }
+                    ) {
+                        Text("删除", color = DangerRed, fontWeight = FontWeight.Bold)
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showDeleteDialog = false }) {
+                        Text("取消", color = TextSecondary)
+                    }
+                }
+            )
+        }
     }
 }
 
@@ -376,22 +478,141 @@ private fun OutlinedUnrecognizedChip(
 @Composable
 private fun OverviewSubTabContent(
     event: MemoryEvent,
+    scrollState: ScrollState,
     onGenerateDetailedNote: () -> Unit,
     onUseAgent: () -> Unit
 ) {
+    var todoChecked by remember(event.id) {
+        mutableStateOf(mapOf(0 to true, 1 to false, 2 to false))
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(horizontal = 20.dp)
+            .verticalScroll(scrollState)
+            .padding(horizontal = 20.dp),
+        verticalArrangement = Arrangement.spacedBy(18.dp)
     ) {
-        Text(
-            text = event.summaryOverview,
-            color = TextPrimary,
-            fontSize = 15.sp,
-            lineHeight = 24.sp
-        )
+        // 核心梗概
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("核心梗概", color = TextSecondary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            Text(
+                text = event.summaryOverview,
+                color = TextPrimary,
+                fontSize = 15.sp,
+                lineHeight = 24.sp
+            )
+        }
 
-        Spacer(modifier = Modifier.height(24.dp))
+        // 拍板决定 (Decisions)
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.CheckCircle, contentDescription = null, tint = PrimaryNeonGreen, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("拍板决定 (Decisions)", color = PrimaryNeonGreen, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            }
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(10.dp),
+                color = Color(0xFF142017),
+                border = BorderStroke(1.dp, Color(0xFF233B2B))
+            ) {
+                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "• 拍板通过：新架构特性随当前版本上线；离线容错与异常重试机制纳入后续迭代，交付时间表严格维持不变。",
+                        color = TextPrimary,
+                        fontSize = 14.sp,
+                        lineHeight = 22.sp
+                    )
+                    Text(
+                        text = "• 确定采用端云双轨与硬件级 AES-256 安全加密存储策略。",
+                        color = TextSecondary,
+                        fontSize = 13.sp,
+                        lineHeight = 20.sp
+                    )
+                }
+            }
+        }
+
+        // 可执行待办 (Action Items / To-Do)
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Outlined.Checklist, contentDescription = null, tint = TextPrimary, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("可执行待办 (Action Items)", color = TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            }
+            val todos = listOf(
+                Triple("把 beta 亮点与接入文档同步给团队", "Mike", "周五前"),
+                Triple("准备发布候选构建与签名校验验证", "Alex", "本周三"),
+                Triple("整理 MCP 服务端回归验证清单", "Sam", "待确认")
+            )
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(10.dp),
+                color = Color(0xFF181C19),
+                border = BorderStroke(1.dp, DividerDark)
+            ) {
+                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    todos.forEachIndexed { idx, (task, owner, deadline) ->
+                        val isChecked = todoChecked[idx] == true
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    todoChecked = todoChecked + (idx to !isChecked)
+                                },
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Checkbox(
+                                checked = isChecked,
+                                onCheckedChange = { chk -> todoChecked = todoChecked + (idx to chk) },
+                                colors = CheckboxDefaults.colors(
+                                    checkedColor = PrimaryNeonGreen,
+                                    checkmarkColor = Color.Black,
+                                    uncheckedColor = TextMuted
+                                ),
+                                modifier = Modifier.size(24.dp)
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = task,
+                                    color = if (isChecked) TextMuted else TextPrimary,
+                                    fontSize = 14.sp,
+                                    textDecoration = if (isChecked) TextDecoration.LineThrough else null
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = "责任人: $owner · 截止: $deadline",
+                                    color = TextSecondary,
+                                    fontSize = 12.sp
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 未决问题与想法 (Open Questions & Ideas)
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Outlined.Lightbulb, contentDescription = null, tint = Color(0xFFE5B58C), modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("未决问题与后续想法", color = Color(0xFFE5B58C), fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            }
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(10.dp),
+                color = Color(0xFF1B1917),
+                border = BorderStroke(1.dp, Color(0xFF3B2E24))
+            ) {
+                Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("• 考虑后续引入端侧轻量小模型执行预降噪与环境音分类", color = TextSecondary, fontSize = 13.sp)
+                    Text("• 达人电话商务合作场景是否需二次风控确认？", color = TextSecondary, fontSize = 13.sp)
+                }
+            }
+        }
 
         // Card 1: 生成详细整理
         Surface(
@@ -440,8 +661,6 @@ private fun OverviewSubTabContent(
             }
         }
 
-        Spacer(modifier = Modifier.height(12.dp))
-
         // Card 2: 使用你的 Agent
         Surface(
             modifier = Modifier
@@ -488,16 +707,21 @@ private fun OverviewSubTabContent(
                 }
             }
         }
+
+        Spacer(modifier = Modifier.height(16.dp))
     }
 }
 
 @Composable
 private fun TranscriptSubTabContent(
     event: MemoryEvent,
+    lazyListState: LazyListState,
     searchQuery: String,
     onSearchQueryChange: (String) -> Unit,
     onSpeakerClick: (String) -> Unit
 ) {
+    var playingSentenceId by remember { mutableStateOf<String?>(null) }
+
     val filteredTranscripts = remember(event.transcripts, searchQuery) {
         if (searchQuery.isBlank()) event.transcripts
         else event.transcripts.filter {
@@ -507,6 +731,7 @@ private fun TranscriptSubTabContent(
     }
 
     LazyColumn(
+        state = lazyListState,
         modifier = Modifier
             .fillMaxSize()
             .padding(horizontal = 20.dp),
@@ -532,7 +757,7 @@ private fun TranscriptSubTabContent(
                 Spacer(modifier = Modifier.width(8.dp))
                 Box(modifier = Modifier.weight(1f)) {
                     if (searchQuery.isEmpty()) {
-                        Text("搜索发言人或逐字稿...", color = TextMuted, fontSize = 14.sp)
+                        Text("搜索逐字稿或发言人...", color = TextMuted, fontSize = 14.sp)
                     }
                     androidx.compose.foundation.text.BasicTextField(
                         value = searchQuery,
@@ -548,7 +773,7 @@ private fun TranscriptSubTabContent(
         }
 
         item {
-            // Tip Banner: 点发言人名字可标注 / 更改归属
+            // Tip Banner
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -566,7 +791,7 @@ private fun TranscriptSubTabContent(
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = "点发言人名字可标注 / 更改归属",
+                    text = "点击语句可回放原声 · 点击发言人标签可直接标注或更名",
                     color = TextSecondary,
                     fontSize = 13.sp
                 )
@@ -584,29 +809,82 @@ private fun TranscriptSubTabContent(
             }
         } else {
             items(filteredTranscripts, key = { it.id }) { seg ->
-                Column(modifier = Modifier.fillMaxWidth()) {
+                val isPlaying = playingSentenceId == seg.id
+                val isUnrecognized = seg.speaker.contains("未识别") || seg.speaker.equals("Unknown", ignoreCase = true)
+                val isLikelyCandidate = seg.speaker.contains("待确认") || seg.speaker.contains("可能是") || seg.speaker.startsWith("spk_")
+
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (isPlaying) Color(0xFF18261D) else Color.Transparent)
+                        .clickable {
+                            playingSentenceId = if (isPlaying) null else seg.id
+                        }
+                        .padding(horizontal = 6.dp, vertical = 6.dp)
+                ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            text = seg.speaker,
-                            color = TextSecondary,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(4.dp))
-                                .clickable { onSpeakerClick(seg.speaker) }
-                                .padding(vertical = 2.dp, horizontal = 2.dp)
-                        )
+                        if (isUnrecognized) {
+                            Surface(
+                                shape = RoundedCornerShape(4.dp),
+                                color = Color(0xFF222623)
+                            ) {
+                                Text(
+                                    text = "未识别",
+                                    color = TextMuted,
+                                    fontSize = 12.sp,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                        } else if (isLikelyCandidate) {
+                            Surface(
+                                shape = RoundedCornerShape(4.dp),
+                                color = Color(0xFF192C1F),
+                                border = BorderStroke(1.dp, PrimaryNeonGreen),
+                                modifier = Modifier.clickable { onSpeakerClick(seg.speaker) }
+                            ) {
+                                Text(
+                                    text = "可能是 ${seg.speaker.replace("spk_", "")} · 78%",
+                                    color = PrimaryNeonGreen,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                        } else {
+                            Text(
+                                text = seg.speaker,
+                                color = PrimaryNeonGreen,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .clickable { onSpeakerClick(seg.speaker) }
+                                    .padding(vertical = 2.dp, horizontal = 2.dp)
+                            )
+                        }
+
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
                             text = seg.time,
                             color = TextMuted,
                             fontSize = 12.sp
                         )
+
+                        if (isPlaying) {
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.VolumeUp,
+                                contentDescription = "正在回放",
+                                tint = PrimaryNeonGreen,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
                     }
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
                         text = seg.text,
-                        color = TextPrimary,
+                        color = if (isPlaying) PrimaryNeonGreen else TextPrimary,
                         fontSize = 15.sp,
                         lineHeight = 24.sp
                     )
@@ -617,12 +895,142 @@ private fun TranscriptSubTabContent(
 }
 
 @Composable
-private fun VoiceSubTabContent() {
+private fun VoiceSubTabContent(
+    event: MemoryEvent,
+    knownPeople: List<PersonVoiceProfile>,
+    scrollState: ScrollState,
+    onConfirmSpeaker: (oldName: String, newName: String) -> Unit
+) {
+    var isPlayingVoice by remember { mutableStateOf(false) }
+    var confirmedCandidate by remember { mutableStateOf<String?>(null) }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(horizontal = 20.dp)
+            .verticalScroll(scrollState)
+            .padding(horizontal = 20.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
+        if (event.unrecognizedVoiceCount > 0 && confirmedCandidate == null) {
+            val candidateName = knownPeople.firstOrNull()?.name ?: "Marco"
+
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(14.dp),
+                color = Color(0xFF17201A),
+                border = BorderStroke(1.dp, PrimaryNeonGreen.copy(alpha = 0.5f))
+            ) {
+                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("关于这位说话人", color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = Color(0xFF1D3322),
+                            border = BorderStroke(1.dp, PrimaryNeonGreen)
+                        ) {
+                            Text(
+                                text = "疑似度 78%",
+                                color = PrimaryNeonGreen,
+                                fontSize = 11.sp,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+
+                    // AI 发言场景侧写
+                    Column {
+                        Text("AI 发言场景侧写：", color = TextMuted, fontSize = 12.sp)
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = "多在技术方案评审与商务对齐场景中发言，负责方案细节沟通与架构对齐。",
+                            color = TextSecondary,
+                            fontSize = 13.sp,
+                            lineHeight = 18.sp
+                        )
+                    }
+
+                    // 典型原声文本
+                    Column {
+                        Text("典型发言原声：", color = TextMuted, fontSize = 12.sp)
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = "“200ms 延迟那个方案，我又想了想，还是行不通……”",
+                            color = TextPrimary,
+                            fontSize = 14.sp,
+                            fontStyle = FontStyle.Italic
+                        )
+                    }
+
+                    // 音频试听控制条
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Color(0xFF202B23))
+                            .clickable { isPlayingVoice = !isPlayingVoice }
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = if (isPlayingVoice) Icons.AutoMirrored.Filled.VolumeUp else Icons.Default.PlayArrow,
+                                contentDescription = "试听",
+                                tint = PrimaryNeonGreen,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = if (isPlayingVoice) "正在回放原声切片..." else "点击试听原声切片",
+                                color = PrimaryNeonGreen,
+                                fontSize = 13.sp
+                            )
+                        }
+                        Text("10:31 · 听到 4 次", color = TextMuted, fontSize = 12.sp)
+                    }
+
+                    // 三项操作按钮
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = {
+                                confirmedCandidate = candidateName
+                                onConfirmSpeaker("待确认说话人", candidateName)
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = PrimaryNeonGreen),
+                            modifier = Modifier.weight(1.3f)
+                        ) {
+                            Text("对，是 $candidateName 78%", color = Color.Black, fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                confirmedCandidate = "其它"
+                                onConfirmSpeaker("待确认说话人", "其它")
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("是别人", color = TextSecondary, fontSize = 12.sp)
+                        }
+                        TextButton(
+                            onClick = {
+                                confirmedCandidate = "ignored"
+                            },
+                            modifier = Modifier.weight(0.8f)
+                        ) {
+                            Text("忽略", color = TextMuted, fontSize = 12.sp)
+                        }
+                    }
+                }
+            }
+        }
+
+        // Info Banner
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -640,7 +1048,10 @@ private fun VoiceSubTabContent() {
             )
             Spacer(modifier = Modifier.width(10.dp))
             Text(
-                text = "本段没有待识别的声音 —— 新说话人出现时会在这里等你确认。",
+                text = if (confirmedCandidate != null)
+                    "已完成本段声音归属确认，相关声纹特征已全局同步更新。"
+                else
+                    "本段没有更多待识别的声音 —— 新说话人出现时会在这里等你确认。",
                 color = TextSecondary,
                 fontSize = 14.sp,
                 lineHeight = 21.sp

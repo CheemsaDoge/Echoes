@@ -86,7 +86,7 @@ class Api(private val prefs: SecurePreferences) {
     }.getOrNull()
 
     suspend fun updateSpeaker(id: String, name: String): JSONObject? = runCatching {
-        val body = JSONObject().put("id", id).put("name", name)
+        val body = JSONObject().put("name", name)
         JSONObject(call("/v1/speakers/$id", "PUT", body))
     }.getOrNull()
 

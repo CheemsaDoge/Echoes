@@ -61,7 +61,8 @@ class StandaloneTranscriber(
 
         val wavBytes = file.readBytes()
         val rms = computeRms(wavBytes)
-        if (rms < SILENCE_RMS_THRESHOLD) {
+        val rmsGate = prefs.vadRmsGate.coerceAtLeast(0.0001f)
+        if (rms < rmsGate) {
             // Audio is silent energy; skip API call to conserve tokens/quota
             dao.markUpload(chunk.id, "completed")
             return@withContext true

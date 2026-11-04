@@ -277,9 +277,73 @@ class AppViewModel @JvmOverloads constructor(
         if (repo.prefs.operationMode != "standalone" && repo.prefs.token.isNotBlank()) {
             runCatching { repo.api.updateSpeaker(id, newName) }
         }
-        val updatedPayload = JSONObject().put("id", id).put("name", newName).put("voiceprint_count", 1)
+        val count = entry?.let { JSONObject(it.payload).optInt("voiceprint_count", 1) } ?: 1
+        val updatedPayload = JSONObject().put("id", id).put("name", newName).put("voiceprint_count", count)
         repo.dao.putCache(listOf(dev.echoledger.app.data.CacheEntry("speakers", id, 0, 0, updatedPayload.toString())))
+
+        // Sync rename into all cached local events
+        val allEventsEntries = repo.dao.observe("events").firstOrNull() ?: emptyList()
+        val updatedEvents = allEventsEntries.mapNotNull { evEntry ->
+            val json = runCatching { JSONObject(evEntry.payload) }.getOrNull() ?: return@mapNotNull null
+            var modified = false
+            val speakerNames = json.optJSONArray("speaker_names")
+            if (speakerNames != null) {
+                val newArr = org.json.JSONArray()
+                for (i in 0 until speakerNames.length()) {
+                    val s = speakerNames.optString(i)
+                    if (s == oldName) {
+                        newArr.put(newName)
+                        modified = true
+                    } else {
+                        newArr.put(s)
+                    }
+                }
+                if (modified) json.put("speaker_names", newArr)
+            }
+            val segments = json.optJSONArray("segments")
+            if (segments != null) {
+                for (i in 0 until segments.length()) {
+                    val seg = segments.optJSONObject(i) ?: continue
+                    if (seg.optString("speaker_name") == oldName) {
+                        seg.put("speaker_name", newName)
+                        modified = true
+                    }
+                }
+            }
+            if (modified) evEntry.copy(payload = json.toString()) else null
+        }
+        if (updatedEvents.isNotEmpty()) {
+            repo.dao.putCache(updatedEvents)
+        }
         repo.refresh(day.value)
+    }
+
+    fun renameEvent(eventId: String, newTitle: String) = act {
+        val allEventsEntries = repo.dao.observe("events").firstOrNull() ?: emptyList()
+        val entry = allEventsEntries.find { it.id == eventId }
+        if (entry != null) {
+            val json = runCatching { JSONObject(entry.payload) }.getOrNull()
+            if (json != null) {
+                json.put("title", newTitle)
+                repo.dao.putCache(listOf(dev.echoledger.app.data.CacheEntry("events", eventId, 0, 0, json.toString())))
+            }
+        }
+        if (repo.prefs.operationMode != "standalone" && repo.prefs.token.isNotBlank()) {
+            runCatching {
+                repo.api.call("/v1/events/$eventId", "PATCH", JSONObject().put("title", newTitle))
+            }
+        }
+        repo.refresh(day.value)
+        repo.message.value = "已更新事件标题"
+    }
+
+    fun deleteEvent(eventId: String) = act {
+        repo.dao.deleteCacheEntry("events", eventId)
+        if (repo.prefs.operationMode != "standalone" && repo.prefs.token.isNotBlank()) {
+            runCatching { repo.api.call("/v1/events/$eventId", "DELETE") }
+        }
+        repo.refresh(day.value)
+        repo.message.value = "已删除事件记录"
     }
 
     fun deleteSpeaker(name: String) = act {

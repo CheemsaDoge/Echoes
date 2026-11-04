@@ -19,3 +19,5 @@ local.properties
 artifacts/*.jar
 .tools/
 *.apk
+.kotlin/
+.agents/

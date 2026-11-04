@@ -15,7 +15,9 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -44,6 +46,7 @@ fun AppScreen(
     val rawEvents by vm.events.collectAsStateWithLifecycle()
     val rawPeople by vm.people.collectAsStateWithLifecycle()
     val showDemoDataWhenEmpty by vm.showDemoDataWhenEmpty.collectAsStateWithLifecycle()
+    val clipboardManager = androidx.compose.ui.platform.LocalClipboardManager.current
 
     var currentTab by remember { mutableStateOf(MainBottomTab.TIMELINE) }
     var selectedDay by remember { mutableIntStateOf(LocalDate.now().dayOfMonth) }
@@ -57,27 +60,70 @@ fun AppScreen(
         rawPeople.map { jsonToPersonVoiceProfile(it) }
     }
 
-    // Merge with sample memory data when empty or configured
+    // Isolate demo fixtures: only show fixtures when user has no real records and demo switch is enabled
     var events by remember(convertedRealEvents, showDemoDataWhenEmpty) {
         val list = if (convertedRealEvents.isNotEmpty()) {
-            if (showDemoDataWhenEmpty) convertedRealEvents + SampleMemoryData.events else convertedRealEvents
+            convertedRealEvents
+        } else if (showDemoDataWhenEmpty) {
+            SampleMemoryData.events
         } else {
-            if (showDemoDataWhenEmpty) SampleMemoryData.events else emptyList()
+            emptyList()
         }
         mutableStateOf(list)
     }
 
     var people by remember(convertedRealPeople, showDemoDataWhenEmpty) {
         val list = if (convertedRealPeople.isNotEmpty()) {
-            if (showDemoDataWhenEmpty) convertedRealPeople + SampleMemoryData.initialPeople else convertedRealPeople
+            convertedRealPeople
+        } else if (showDemoDataWhenEmpty) {
+            SampleMemoryData.initialPeople
         } else {
-            if (showDemoDataWhenEmpty) SampleMemoryData.initialPeople else emptyList()
+            emptyList()
         }
         mutableStateOf(list)
     }
 
-    var unrecognizedClips by remember {
-        mutableStateOf(SampleMemoryData.initialUnrecognizedClips)
+    // Populate unrecognized voice clips from actual unassigned event segments
+    val realUnrecognizedClips = remember(rawEvents) {
+        val list = mutableListOf<UnrecognizedVoiceClip>()
+        rawEvents.forEach { evJson ->
+            val segs = evJson.optJSONArray("segments") ?: return@forEach
+            for (i in 0 until segs.length()) {
+                val seg = segs.optJSONObject(i) ?: continue
+                val spk = seg.optString("speaker_name")
+                if (spk.isBlank() || spk.contains("待确认") || spk.contains("未识别") || spk.equals("Unknown", ignoreCase = true)) {
+                    val id = seg.optString("id", "clip_${list.size}")
+                    val text = seg.optString("text")
+                    if (text.isNotBlank()) {
+                        val startMs = seg.optLong("start_ms", System.currentTimeMillis())
+                        val timeStr = java.time.Instant.ofEpochMilli(startMs)
+                            .atZone(java.time.ZoneId.systemDefault())
+                            .format(java.time.format.DateTimeFormatter.ofPattern("yyyy年MM月dd日 HH:mm"))
+                        list.add(
+                            UnrecognizedVoiceClip(
+                                id = id,
+                                quote = text,
+                                timestamp = timeStr,
+                                occurrences = 1,
+                                sampleCount = 1
+                            )
+                        )
+                    }
+                }
+            }
+        }
+        list
+    }
+
+    var unrecognizedClips by remember(realUnrecognizedClips, showDemoDataWhenEmpty) {
+        val list = if (realUnrecognizedClips.isNotEmpty()) {
+            realUnrecognizedClips
+        } else if (showDemoDataWhenEmpty) {
+            SampleMemoryData.initialUnrecognizedClips
+        } else {
+            emptyList()
+        }
+        mutableStateOf(list)
     }
 
     // Secondary navigation overlays
@@ -175,6 +221,9 @@ fun AppScreen(
                             isCalendarExpanded = isCalendarExpanded,
                             onToggleCalendarExpanded = { isCalendarExpanded = !isCalendarExpanded },
                             events = events,
+                            isListening = recordingState.recording,
+                            isProcessingSavedListening = (!recordingState.recording && (vm.pending.collectAsStateWithLifecycle().value > 0)),
+                            onStopListening = onStop,
                             onEventClick = { activeEventDetail = it },
                             onScatteredFragmentsClick = { fragments ->
                                 activeScatteredFragments = fragments
@@ -272,6 +321,20 @@ fun AppScreen(
                     onOpenUnrecognizedVoices = {
                         showUnrecognizedVoicesScreen = true
                     },
+                    onDeleteEvent = { ev ->
+                        vm.deleteEvent(ev.id)
+                        toastMessage = "已删除记录"
+                    },
+                    onRenameEvent = { newTitle ->
+                        val currentEv = activeEventDetail
+                        if (currentEv != null) {
+                            val updated = currentEv.copy(title = newTitle)
+                            activeEventDetail = updated
+                            events = events.map { if (it.id == updated.id) updated else it }
+                            vm.renameEvent(updated.id, newTitle)
+                            toastMessage = "已修改标题为「$newTitle」"
+                        }
+                    },
                     onReassignSpeaker = { oldName, newName ->
                         val updatedEvent = activeEventDetail!!.copy(
                             speakers = activeEventDetail!!.speakers.map { if (it == oldName) newName else it },
@@ -329,10 +392,17 @@ fun AppScreen(
 
             // 6. Agent Integration Guide Screen
             if (activeAgentGuideName != null) {
+                val clipboardManager = LocalClipboardManager.current
                 AgentIntegrationSheetScreen(
                     agentName = activeAgentGuideName!!,
                     onClose = { activeAgentGuideName = null },
                     onCopyPrompt = {
+                        val prompt = """
+Please connect Memory as my memory vault (add an MCP server) with the config below. When done, call search_memory once to confirm it works:
+URL: ${vm.serverBaseUrl.value.ifBlank { "https://mcp.memory.app" }}/mcp
+Key: ${vm.mcpToken.value.ifBlank { "hnk_live_mcp_token_placeholder" }}
+""".trimIndent()
+                        clipboardManager.setText(AnnotatedString(prompt))
                         toastMessage = "已复制 MCP 接入提示词"
                         activeAgentGuideName = null
                     }
@@ -344,6 +414,7 @@ fun AppScreen(
                 SettingsOverlayScreen(
                     vm = vm,
                     initialSubPage = activeSettingsSubPage!!,
+                    onRecord = onRecord,
                     onClose = { activeSettingsSubPage = null }
                 )
             }

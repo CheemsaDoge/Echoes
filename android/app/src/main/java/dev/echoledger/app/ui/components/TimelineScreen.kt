@@ -12,7 +12,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
 import androidx.compose.material3.*
@@ -134,6 +136,9 @@ fun TimelineScreen(
     isCalendarExpanded: Boolean,
     onToggleCalendarExpanded: () -> Unit,
     events: List<MemoryEvent>,
+    isListening: Boolean = false,
+    isProcessingSavedListening: Boolean = false,
+    onStopListening: () -> Unit = {},
     onEventClick: (MemoryEvent) -> Unit,
     onScatteredFragmentsClick: (List<SubFragmentItem>) -> Unit,
     onUpgradeClick: () -> Unit,
@@ -141,6 +146,37 @@ fun TimelineScreen(
 ) {
     val dayEvents = remember(selectedDay, events) {
         events.filter { it.dayNumber == selectedDay }
+    }
+
+    val today = remember {
+        try {
+            java.time.LocalDate.now()
+        } catch (_: Throwable) {
+            null
+        }
+    }
+    val todayDayNumber = today?.dayOfMonth ?: 3
+    val monthLabel = remember(today) {
+        if (today != null) {
+            val m = today.monthValue
+            "${today.year} / ${if (m < 10) "0$m" else "$m"}"
+        } else {
+            "2026 / 10"
+        }
+    }
+    val calendarDays = remember(today, events) {
+        if (today != null) {
+            val dayOfWeek = today.dayOfWeek.value
+            val monday = today.minusDays((dayOfWeek - 1).toLong())
+            val dayLabels = listOf("一", "二", "三", "四", "五", "六", "日")
+            (0..6).map { idx ->
+                val d = monday.plusDays(idx.toLong())
+                val count = events.count { it.dayNumber == d.dayOfMonth }
+                CalendarDayItem(dayLabels[idx], d.dayOfMonth, count)
+            }
+        } else {
+            SampleMemoryData.calendarDaysWeek1
+        }
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -166,7 +202,7 @@ fun TimelineScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "2026 / 10",
+                            text = monthLabel,
                             color = TextSecondary,
                             fontSize = 15.sp,
                             fontWeight = FontWeight.Medium
@@ -186,7 +222,7 @@ fun TimelineScreen(
                         fontSize = 14.sp,
                         modifier = Modifier
                             .clip(RoundedCornerShape(8.dp))
-                            .clickable { onSelectDay(3) }
+                            .clickable { onSelectDay(todayDayNumber) }
                             .padding(horizontal = 8.dp, vertical = 4.dp)
                             .testTag("back_to_today_button")
                     )
@@ -199,7 +235,7 @@ fun TimelineScreen(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    SampleMemoryData.calendarDaysWeek1.forEach { item ->
+                    calendarDays.forEach { item ->
                         val isSelected = item.dayNumber == selectedDay
                         CalendarDayCell(
                             item = item,
@@ -251,7 +287,7 @@ fun TimelineScreen(
 
             // Timeline Content
             Box(modifier = Modifier.weight(1f)) {
-                if (dayEvents.isEmpty()) {
+                if (dayEvents.isEmpty() && !isListening && !isProcessingSavedListening) {
                     EmptyDayTimelineView()
                 } else {
                     LazyColumn(
@@ -261,6 +297,16 @@ fun TimelineScreen(
                         contentPadding = PaddingValues(vertical = 12.dp, horizontal = 12.dp),
                         verticalArrangement = Arrangement.spacedBy(16.dp)
                     ) {
+                        if (isListening) {
+                            item(key = "active_listening_card") {
+                                ActiveListeningTimelineCard(onStop = onStopListening)
+                            }
+                        }
+                        if (isProcessingSavedListening) {
+                            item(key = "listening_saved_card") {
+                                ListeningSavedTimelineCard()
+                            }
+                        }
                         items(dayEvents, key = { it.id }) { event ->
                             TimelineEventRow(
                                 event = event,
@@ -285,6 +331,8 @@ fun TimelineScreen(
                 ) {
                     MonthCalendarSheet(
                         selectedDay = selectedDay,
+                        monthLabel = monthLabel,
+                        todayDayNumber = todayDayNumber,
                         onSelectDay = {
                             onSelectDay(it)
                             onToggleCalendarExpanded()
@@ -513,37 +561,200 @@ private fun TimelineEventRow(
                     }
                 }
 
-                Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(Color(0xFF141C16))
-                        .border(1.dp, Color(0xFF1E2D22), RoundedCornerShape(10.dp))
-                        .clickable { onScatteredClick() }
-                        .padding(horizontal = 16.dp, vertical = 12.dp)
-                        .testTag("scattered_fragments_${event.id}"),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    event.subFragments.forEach { frag ->
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = frag.title,
-                                color = Color(0xFF7FA388),
-                                fontSize = 14.sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            Text(
-                                text = frag.duration,
-                                color = TextMuted,
-                                fontSize = 12.sp
-                            )
+                if (event.subFragments.size == 1) {
+                    val frag = event.subFragments.first()
+                    Row(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Color(0xFF141C16))
+                            .border(1.dp, Color(0xFF1E2D22), RoundedCornerShape(8.dp))
+                            .clickable { onScatteredClick() }
+                            .padding(horizontal = 14.dp, vertical = 8.dp)
+                            .testTag("scattered_fragments_${event.id}"),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(6.dp)
+                                .clip(CircleShape)
+                                .background(PrimaryNeonGreen)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = frag.title,
+                            color = Color(0xFF7FA388),
+                            fontSize = 13.sp,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text(
+                            text = frag.duration,
+                            color = TextMuted,
+                            fontSize = 11.sp
+                        )
+                    }
+                } else {
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color(0xFF141C16))
+                            .border(1.dp, Color(0xFF1E2D22), RoundedCornerShape(10.dp))
+                            .clickable { onScatteredClick() }
+                            .padding(horizontal = 16.dp, vertical = 12.dp)
+                            .testTag("scattered_fragments_${event.id}"),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        event.subFragments.forEach { frag ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = frag.title,
+                                    color = Color(0xFF7FA388),
+                                    fontSize = 14.sp
+                                )
+                                Text(
+                                    text = frag.duration,
+                                    color = TextMuted,
+                                    fontSize = 12.sp
+                                )
+                            }
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun ActiveListeningTimelineCard(
+    onStop: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        verticalAlignment = Alignment.Top
+    ) {
+        Column(
+            modifier = Modifier.width(46.dp).padding(end = 6.dp),
+            horizontalAlignment = Alignment.End
+        ) {
+            Text("NOW", color = PrimaryNeonGreen, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            Spacer(modifier = Modifier.height(6.dp))
+            Box(
+                modifier = Modifier
+                    .width(3.dp)
+                    .height(52.dp)
+                    .clip(RoundedCornerShape(1.5.dp))
+                    .background(PrimaryNeonGreen)
+            )
+        }
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .clip(RoundedCornerShape(12.dp))
+                .background(Color(0xFF14261B))
+                .border(1.5.dp, PrimaryNeonGreen, RoundedCornerShape(12.dp))
+                .clickable { onStop() }
+                .padding(16.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                    Box(
+                        modifier = Modifier
+                            .size(10.dp)
+                            .clip(CircleShape)
+                            .background(PrimaryNeonGreen)
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Column {
+                        Text(
+                            text = "正在全时聆听记忆...",
+                            color = TextPrimary,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = "麦克风实时采集活跃 · 点击停止并整理",
+                            color = Color(0xFF7FA388),
+                            fontSize = 12.sp
+                        )
+                    }
+                }
+                Icon(
+                    imageVector = Icons.Default.Stop,
+                    contentDescription = "停止聆听",
+                    tint = DangerRed,
+                    modifier = Modifier.size(24.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun ListeningSavedTimelineCard() {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        verticalAlignment = Alignment.Top
+    ) {
+        Column(
+            modifier = Modifier.width(46.dp).padding(end = 6.dp),
+            horizontalAlignment = Alignment.End
+        ) {
+            Text("SAVED", color = TextSecondary, fontSize = 10.sp)
+            Spacer(modifier = Modifier.height(6.dp))
+            Box(
+                modifier = Modifier
+                    .width(3.dp)
+                    .height(46.dp)
+                    .clip(RoundedCornerShape(1.5.dp))
+                    .background(DividerDark)
+            )
+        }
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .clip(RoundedCornerShape(12.dp))
+                .background(Color(0xFF171F1A))
+                .border(1.dp, Color(0xFF283B2E), RoundedCornerShape(12.dp))
+                .padding(14.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(18.dp),
+                    color = PrimaryNeonGreen,
+                    strokeWidth = 2.dp
+                )
+                Spacer(modifier = Modifier.width(12.dp))
+                Column {
+                    Text(
+                        text = "音频已安全保存在本机设备上",
+                        color = TextPrimary,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = "后台正在安全生成记忆结构化摘要与活动切分…",
+                        color = TextMuted,
+                        fontSize = 12.sp
+                    )
                 }
             }
         }
@@ -620,6 +831,8 @@ private fun EmptyDayTimelineView() {
 @Composable
 private fun MonthCalendarSheet(
     selectedDay: Int,
+    monthLabel: String,
+    todayDayNumber: Int,
     onSelectDay: (Int) -> Unit,
     onClose: () -> Unit
 ) {
@@ -650,7 +863,7 @@ private fun MonthCalendarSheet(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "2026 / 10",
+                    text = monthLabel,
                     color = TextPrimary,
                     fontSize = 16.sp,
                     fontWeight = FontWeight.SemiBold
@@ -661,7 +874,7 @@ private fun MonthCalendarSheet(
                         color = TextSecondary,
                         fontSize = 14.sp,
                         modifier = Modifier
-                            .clickable { onSelectDay(3) }
+                            .clickable { onSelectDay(todayDayNumber) }
                             .padding(horizontal = 8.dp, vertical = 4.dp)
                     )
                     IconButton(onClick = onClose, modifier = Modifier.size(32.dp)) {

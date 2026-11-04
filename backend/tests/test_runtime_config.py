@@ -388,3 +388,30 @@ def test_runtime_config_vad_versioned_profiles(test_client):
     assert old_row is not None
     assert old_row["active"] == 0
 
+
+def test_runtime_config_concurrent_updates_serialized(test_client):
+    from concurrent.futures import ThreadPoolExecutor
+    client, app, _ = test_client
+
+    def update_model():
+        with TestClient(app) as c:
+            c.headers["Authorization"] = "Bearer " + TOKEN
+            return c.put("/v1/runtime-config", json={"gemini_model": "concurrent-model"}).status_code
+
+    def update_margin():
+        with TestClient(app) as c:
+            c.headers["Authorization"] = "Bearer " + TOKEN
+            return c.put("/v1/runtime-config", json={"margin": 0.25}).status_code
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        f1 = executor.submit(update_model)
+        f2 = executor.submit(update_margin)
+        assert f1.result() == 200
+        assert f2.result() == 200
+
+    # Both live settings must be intact and not clobbered by race conditions
+    assert app.state.settings.gemini_model == "concurrent-model"
+    assert app.state.settings.margin == 0.25
+    assert app.state.db.get_setting("asr.gemini_model") == "concurrent-model"
+    assert float(app.state.db.get_setting("voiceprint.margin")) == 0.25
+

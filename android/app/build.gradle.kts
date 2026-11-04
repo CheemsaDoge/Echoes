@@ -4,17 +4,19 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
     id("com.google.devtools.ksp")
 }
-fun gitExecOutput(vararg args: String): String? {
+fun gitExecOutput(vararg args: String): String? = try {
     val execProvider = providers.exec {
         workingDir = rootDir
         isIgnoreExitValue = true
         commandLine(*args)
     }
-    return if (execProvider.result.get().exitValue == 0) {
+    if (execProvider.result.get().exitValue == 0) {
         execProvider.standardOutput.asText.get().trim()
     } else {
         null
     }
+} catch (_: Exception) {
+    null
 }
 
 val versionMajor = 0
@@ -23,10 +25,19 @@ val versionMinor = 2
 val v020BaseCommitCount = 43
 val overrideVersionCode = (project.findProperty("VERSION_CODE") as? String)?.toIntOrNull()
 val overrideVersionName = (project.findProperty("VERSION_NAME") as? String)?.takeIf { it.isNotBlank() }
-val totalGitCommits = gitExecOutput("git", "rev-list", "--count", "HEAD")?.toIntOrNull()
-val isShallowRepo = gitExecOutput("git", "rev-parse", "--is-shallow-repository") == "true"
+val needsGitVersion = overrideVersionCode == null || overrideVersionName == null
+val totalGitCommits = if (needsGitVersion) {
+    gitExecOutput("git", "rev-list", "--count", "HEAD")?.toIntOrNull()
+} else {
+    null
+}
+val isShallowRepo = if (needsGitVersion) {
+    gitExecOutput("git", "rev-parse", "--is-shallow-repository") == "true"
+} else {
+    false
+}
 
-if (isShallowRepo && (overrideVersionCode == null || overrideVersionName == null)) {
+if (isShallowRepo) {
     error(
         "Shallow git repository detected (commit count=${totalGitCommits ?: "unknown"}). " +
             "Fetch full git history (e.g. 'git fetch --unshallow' or 'fetch-depth: 0') " +

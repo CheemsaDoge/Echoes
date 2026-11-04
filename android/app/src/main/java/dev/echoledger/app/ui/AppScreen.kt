@@ -52,6 +52,8 @@ fun AppScreen(
     val selectedDate by vm.day.collectAsStateWithLifecycle()
     var selectedDay by remember(selectedDate) { mutableIntStateOf(selectedDate.dayOfMonth) }
     var isCalendarExpanded by remember { mutableStateOf(false) }
+    val serverBaseUrl by vm.serverBaseUrl.collectAsStateWithLifecycle()
+    val mcpToken by vm.mcpToken.collectAsStateWithLifecycle()
 
     // Convert raw backend events / people to UI models
     val convertedRealEvents = remember(rawEvents) {
@@ -245,6 +247,8 @@ fun AppScreen(
                         )
 
                         MainBottomTab.AGENT -> AgentScreen(
+                            serverBaseUrl = serverBaseUrl,
+                            mcpToken = mcpToken,
                             onOpenAgentGuide = { agentName ->
                                 activeAgentGuideName = agentName
                             }

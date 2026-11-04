@@ -313,8 +313,16 @@ fun TimelineScreen(
                     if (selectedDate != null && today != null) selectedDate == today
                     else selectedDay == todayDayNumber
                 }
-                val currentHour = remember {
-                    try { java.time.LocalTime.now().hour } catch (_: Throwable) { 12 }
+                val currentHour by produceState(
+                    initialValue = try { java.time.LocalTime.now().hour } catch (_: Throwable) { 12 },
+                    key1 = isListening,
+                    key2 = isProcessingSavedListening
+                ) {
+                    value = try { java.time.LocalTime.now().hour } catch (_: Throwable) { 12 }
+                    while (true) {
+                        kotlinx.coroutines.delay(60_000L)
+                        value = try { java.time.LocalTime.now().hour } catch (_: Throwable) { 12 }
+                    }
                 }
                 val eventsByHour = remember(dayEvents) {
                     dayEvents.groupBy { parseHour(it.startTime) ?: 12 }

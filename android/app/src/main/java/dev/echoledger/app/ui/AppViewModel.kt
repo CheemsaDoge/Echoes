@@ -287,30 +287,43 @@ class AppViewModel @JvmOverloads constructor(
             val json = runCatching { JSONObject(evEntry.payload) }.getOrNull() ?: return@mapNotNull null
             var modified = false
             val speakerNames = json.optJSONArray("speaker_names")
+            val newSpeakerNames = mutableListOf<String>()
             if (speakerNames != null) {
-                val newArr = org.json.JSONArray()
                 for (i in 0 until speakerNames.length()) {
                     val s = speakerNames.optString(i)
-                    if (s == oldName) {
-                        newArr.put(newName)
+                    if (s == oldName || (s.isBlank() && oldName == "待确认发言人")) {
+                        newSpeakerNames.add(newName)
                         modified = true
-                    } else {
-                        newArr.put(s)
+                    } else if (s.isNotBlank() && s != "null") {
+                        newSpeakerNames.add(s)
                     }
                 }
-                if (modified) json.put("speaker_names", newArr)
             }
             val segments = json.optJSONArray("segments")
             if (segments != null) {
                 for (i in 0 until segments.length()) {
                     val seg = segments.optJSONObject(i) ?: continue
-                    if (seg.optString("speaker_name") == oldName) {
+                    val curSpk = if (seg.isNull("speaker_name")) "" else seg.optString("speaker_name")
+                    val curLocal = if (seg.isNull("local_speaker")) "" else seg.optString("local_speaker")
+                    val syntheticLocalName = if (curLocal.isNotBlank() && curLocal != "null") "Speaker $curLocal" else ""
+                    val matches = curSpk == oldName ||
+                            (syntheticLocalName.isNotBlank() && syntheticLocalName == oldName) ||
+                            (curSpk.isBlank() && oldName == "待确认发言人")
+                    if (matches) {
                         seg.put("speaker_name", newName)
+                        if (!newSpeakerNames.contains(newName)) {
+                            newSpeakerNames.add(newName)
+                        }
                         modified = true
                     }
                 }
             }
-            if (modified) evEntry.copy(payload = json.toString()) else null
+            if (modified) {
+                val newArr = org.json.JSONArray()
+                newSpeakerNames.distinct().forEach { newArr.put(it) }
+                json.put("speaker_names", newArr)
+                evEntry.copy(payload = json.toString())
+            } else null
         }
         if (updatedEvents.isNotEmpty()) {
             repo.dao.putCache(updatedEvents)

@@ -485,8 +485,28 @@ private fun OverviewSubTabContent(
     onGenerateDetailedNote: () -> Unit,
     onUseAgent: () -> Unit
 ) {
-    var todoChecked by remember(event.id) {
-        mutableStateOf(mapOf(0 to true, 1 to false, 2 to false))
+    // 可执行待办 (仅当从笔记/要点中解析出真实清单时展示，并正确解析 Markdown 中的完成状态)
+    val todos = remember(event.detailedNoteMarkdown) {
+        val parsed = mutableListOf<Triple<String, String, Boolean>>()
+        val text = event.detailedNoteMarkdown
+        text.lines().forEach { rawLine ->
+            val line = rawLine.trim()
+            val isChecked = line.startsWith("- [x]") || line.startsWith("- [X]") || line.startsWith("* [x]") || line.startsWith("* [X]")
+            val isUnchecked = line.startsWith("- [ ]") || line.startsWith("* [ ]")
+            if (isChecked || isUnchecked) {
+                val task = line.removePrefix("- [x]").removePrefix("- [X]")
+                    .removePrefix("- [ ]").removePrefix("* [x]").removePrefix("* [X]")
+                    .removePrefix("* [ ]").trim()
+                if (task.isNotBlank()) {
+                    parsed.add(Triple(task, event.speakers.firstOrNull() ?: "本人", isChecked))
+                }
+            }
+        }
+        parsed
+    }
+
+    var todoChecked by remember(event.id, todos) {
+        mutableStateOf(todos.mapIndexed { idx, item -> idx to item.third }.toMap())
     }
 
     Column(
@@ -507,22 +527,6 @@ private fun OverviewSubTabContent(
             )
         }
 
-        // 可执行待办 (仅当从笔记/要点中解析出真实清单时展示)
-        val todos = remember(event) {
-            val parsed = mutableListOf<Triple<String, String, String>>()
-            val text = event.detailedNoteMarkdown
-            text.lines().forEach { rawLine ->
-                val line = rawLine.trim()
-                if (line.startsWith("- [ ]") || line.startsWith("- [x]") || line.startsWith("* [ ]")) {
-                    val task = line.removePrefix("- [ ]").removePrefix("- [x]").removePrefix("* [ ]").trim()
-                    if (task.isNotBlank()) {
-                        parsed.add(Triple(task, event.speakers.firstOrNull() ?: "本人", "待跟进"))
-                    }
-                }
-            }
-            parsed
-        }
-
         if (todos.isNotEmpty()) {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -537,7 +541,7 @@ private fun OverviewSubTabContent(
                     border = BorderStroke(1.dp, DividerDark)
                 ) {
                     Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        todos.forEachIndexed { idx, (task, owner, deadline) ->
+                        todos.forEachIndexed { idx, (task, owner, _) ->
                             val isChecked = todoChecked[idx] == true
                             Row(
                                 modifier = Modifier
@@ -567,7 +571,7 @@ private fun OverviewSubTabContent(
                                     )
                                     Spacer(modifier = Modifier.height(2.dp))
                                     Text(
-                                        text = "责任人: $owner · 截止: $deadline",
+                                        text = "责任人: $owner · 状态: ${if (isChecked) "已完成" else "待跟进"}",
                                         color = TextSecondary,
                                         fontSize = 12.sp
                                     )

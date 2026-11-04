@@ -1,5 +1,5 @@
 from __future__ import annotations
-import asyncio, contextlib, hashlib, json, secrets, shutil, threading
+import asyncio, contextlib, copy, hashlib, json, os, secrets, shutil, threading
 from pathlib import Path
 from fastapi import FastAPI, APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
@@ -203,99 +203,143 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             s = val.strip()
             return len(s) > 0 and all(c == '*' for c in s)
 
-        if asr_prov is not None:
-            settings.asr_provider = asr_prov
-            db.set_setting("asr.provider", asr_prov)
+        # 1. Stage candidate settings
+        candidate_asr_prov = asr_prov if asr_prov is not None else settings.asr_provider
+        candidate_g_key = settings.gemini_key if (g_key is None or is_mask(g_key)) else g_key.strip()
+        candidate_g_model = g_model if g_model is not None else settings.gemini_model
+        candidate_g_mode = g_mode if g_mode is not None else settings.gemini_mode
+        candidate_v_proj = v_proj if v_proj is not None else settings.vertex_project
+        candidate_v_loc = v_loc if v_loc is not None else settings.vertex_location
+        candidate_v_model = v_model if v_model is not None else settings.vertex_model
+        candidate_v_endp = v_endp if v_endp is not None else settings.vertex_endpoint
+        candidate_v_key = settings.vertex_api_key if (v_key is None or is_mask(v_key)) else v_key.strip()
 
-        if g_key is not None:
-            if not is_mask(g_key):
-                settings.gemini_key = g_key.strip()
-                db.set_setting("asr.gemini_key", settings.gemini_key)
+        candidate_vad_prov = vad_prov if vad_prov is not None else settings.vad_provider
+        candidate_vad_mod = vad_mod if vad_mod is not None else settings.vad_model
 
-        if g_model is not None:
-            settings.gemini_model = g_model
-            db.set_setting("asr.gemini_model", g_model)
+        candidate_spk_mod = spk_mod if spk_mod is not None else settings.speaker_model_id
+        candidate_sim_th = sim_th if sim_th is not None else settings.similarity_threshold
+        candidate_mrg = mrg if mrg is not None else settings.margin
+        candidate_min_spk = min_spk_ms if min_spk_ms is not None else settings.min_speech_ms
+        candidate_auto_m = auto_m if auto_m is not None else settings.auto_match_enabled
+        candidate_cons_req = cons_req if cons_req is not None else settings.consent_required
 
-        if g_mode is not None:
-            settings.gemini_mode = g_mode
-            db.set_setting("asr.gemini_mode", g_mode)
+        # Validate candidate Settings object before touching database or live settings
+        test_settings = copy.copy(settings)
+        test_settings.asr_provider = candidate_asr_prov
+        test_settings.gemini_key = candidate_g_key
+        test_settings.gemini_model = candidate_g_model
+        test_settings.gemini_mode = candidate_g_mode
+        test_settings.vertex_project = candidate_v_proj
+        test_settings.vertex_location = candidate_v_loc
+        test_settings.vertex_model = candidate_v_model
+        test_settings.vertex_endpoint = candidate_v_endp
+        test_settings.vertex_api_key = candidate_v_key
+        test_settings.vad_provider = candidate_vad_prov
+        test_settings.vad_model = candidate_vad_mod
+        test_settings.speaker_model_id = candidate_spk_mod
+        test_settings.similarity_threshold = candidate_sim_th
+        test_settings.margin = candidate_mrg
+        test_settings.min_speech_ms = candidate_min_spk
+        test_settings.auto_match_enabled = candidate_auto_m
+        test_settings.consent_required = candidate_cons_req
+        try:
+            test_settings.validate()
+        except ValueError as exc:
+            raise HTTPException(422, f"Configuration validation failed: {exc}") from exc
 
-        if v_proj is not None:
-            settings.vertex_project = v_proj
-            db.set_setting("asr.vertex_project", v_proj)
-
-        if v_loc is not None:
-            settings.vertex_location = v_loc
-            db.set_setting("asr.vertex_location", v_loc)
-
-        if v_model is not None:
-            settings.vertex_model = v_model
-            db.set_setting("asr.vertex_model", v_model)
-
-        if v_endp is not None:
-            settings.vertex_endpoint = v_endp
-            db.set_setting("asr.vertex_endpoint", v_endp)
-
-        if v_key is not None:
-            if not is_mask(v_key):
-                settings.vertex_api_key = v_key.strip()
-                db.set_setting("asr.vertex_api_key", settings.vertex_api_key)
-
-        if vad_prov is not None:
-            settings.vad_provider = vad_prov
-            db.set_setting("vad.provider", vad_prov)
-
-        if vad_mod is not None:
-            settings.vad_model = vad_mod
-            db.set_setting("vad.model", vad_mod)
-
-        if spk_mod is not None:
-            settings.speaker_model_id = spk_mod
-            db.set_setting("voiceprint.speaker_model_id", spk_mod)
-
-        if sim_th is not None:
-            settings.similarity_threshold = sim_th
-            db.set_setting("voiceprint.similarity_threshold", str(sim_th))
-
-        if mrg is not None:
-            settings.margin = mrg
-            db.set_setting("voiceprint.margin", str(mrg))
-
-        if min_spk_ms is not None:
-            settings.min_speech_ms = min_spk_ms
-            db.set_setting("voiceprint.min_speech_ms", str(min_spk_ms))
-
-        if auto_m is not None:
-            settings.auto_match_enabled = auto_m
-            db.set_setting("voiceprint.auto_match_enabled", str(auto_m).lower())
-
-        if cons_req is not None:
-            settings.consent_required = cons_req
-            db.set_setting("voiceprint.consent_required", str(cons_req).lower())
-
+        # Validate candidate VAD config if provided
+        active_prof = db.active_profile()
+        updated_vad_cfg = None
         if v_cfg_patch is not None:
-            active_prof = db.active_profile()
             cur_vad = json.loads(active_prof["config"])
             patch_vad = {k: v for k, v in v_cfg_patch.model_dump().items() if v is not None}
             cur_vad.update(patch_vad)
             try:
-                updated_cfg = VadConfig.model_validate(cur_vad)
+                updated_vad_cfg = VadConfig.model_validate(cur_vad)
             except (ValueError, ValidationError) as exc:
                 raise HTTPException(422, f"Invalid VAD config: {exc}") from exc
-            with db.connect(immediate=True) as c:
-                c.execute("UPDATE profiles SET config=? WHERE id=?", (updated_cfg.model_dump_json(), active_prof["id"]))
-                emit(c, "profile.updated", active_prof["id"])
 
+        # Test instantiating the new provider components before committing changes
         try:
-            settings.validate()
-        except ValueError as exc:
-            raise HTTPException(422, f"Configuration validation failed: {exc}") from exc
+            temp_pipeline = Pipeline(db, test_settings)
+            _ = temp_pipeline.scorer
+        except Exception as exc:
+            raise HTTPException(500, f"Failed to initialize VAD provider '{candidate_vad_prov}': {exc}") from exc
+
+        # 2. Persist to database atomically
+        kv_updates = {}
+        if asr_prov is not None:
+            kv_updates["asr.provider"] = candidate_asr_prov
+        if g_key is not None and not is_mask(g_key):
+            kv_updates["asr.gemini_key"] = candidate_g_key
+        if g_model is not None:
+            kv_updates["asr.gemini_model"] = candidate_g_model
+        if g_mode is not None:
+            kv_updates["asr.gemini_mode"] = candidate_g_mode
+        if v_proj is not None:
+            kv_updates["asr.vertex_project"] = candidate_v_proj
+        if v_loc is not None:
+            kv_updates["asr.vertex_location"] = candidate_v_loc
+        if v_model is not None:
+            kv_updates["asr.vertex_model"] = candidate_v_model
+        if v_endp is not None:
+            kv_updates["asr.vertex_endpoint"] = candidate_v_endp
+        if v_key is not None and not is_mask(v_key):
+            kv_updates["asr.vertex_api_key"] = candidate_v_key
+        if vad_prov is not None:
+            kv_updates["vad.provider"] = candidate_vad_prov
+        if vad_mod is not None:
+            kv_updates["vad.model"] = candidate_vad_mod
+        if spk_mod is not None:
+            kv_updates["voiceprint.speaker_model_id"] = candidate_spk_mod
+        if sim_th is not None:
+            kv_updates["voiceprint.similarity_threshold"] = str(candidate_sim_th)
+        if mrg is not None:
+            kv_updates["voiceprint.margin"] = str(candidate_mrg)
+        if min_spk_ms is not None:
+            kv_updates["voiceprint.min_speech_ms"] = str(candidate_min_spk)
+        if auto_m is not None:
+            kv_updates["voiceprint.auto_match_enabled"] = str(candidate_auto_m).lower()
+        if cons_req is not None:
+            kv_updates["voiceprint.consent_required"] = str(candidate_cons_req).lower()
+
+        with db.connect(immediate=True) as c:
+            for k, v in kv_updates.items():
+                c.execute("""INSERT INTO kv_settings(key, value, updated_ms) VALUES(?,?,?)
+                    ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_ms=excluded.updated_ms""",
+                    (k, v, now_ms()))
+            if updated_vad_cfg is not None:
+                new_profile_id = uid()
+                new_profile_name = f"{active_prof['name']} (Runtime)"
+                c.execute("UPDATE profiles SET active=0 WHERE active=1")
+                c.execute("INSERT INTO profiles VALUES(?,?,?,?,1)",
+                          (new_profile_id, new_profile_name, updated_vad_cfg.model_dump_json(), now_ms()))
+                emit(c, "profile.created", new_profile_id)
+                emit(c, "profile.activated", new_profile_id)
+            emit(c, "runtime_config.updated", "runtime-config")
+
+        # 3. Apply staged settings to live state
+        settings.asr_provider = candidate_asr_prov
+        settings.gemini_key = candidate_g_key
+        settings.gemini_model = candidate_g_model
+        settings.gemini_mode = candidate_g_mode
+        settings.vertex_project = candidate_v_proj
+        settings.vertex_location = candidate_v_loc
+        settings.vertex_model = candidate_v_model
+        settings.vertex_endpoint = candidate_v_endp
+        settings.vertex_api_key = candidate_v_key
+        settings.vad_provider = candidate_vad_prov
+        settings.vad_model = candidate_vad_mod
+        settings.speaker_model_id = candidate_spk_mod
+        settings.similarity_threshold = candidate_sim_th
+        settings.margin = candidate_mrg
+        settings.min_speech_ms = candidate_min_spk
+        settings.auto_match_enabled = candidate_auto_m
+        settings.consent_required = candidate_cons_req
 
         pipeline.reload_transcriber()
         pipeline.reload_scorer()
-
-        with db.connect(immediate=True) as c:
-            emit(c, "runtime_config.updated", "runtime-config")
 
         return _build_runtime_config_response()
 
@@ -587,8 +631,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @router.post("/speaker-matches")
     def match(body: VoiceMatch):
+        th = body.threshold if body.threshold is not None else settings.similarity_threshold
+        mg = body.margin if body.margin is not None else settings.margin
         try:
-            return match_speaker(body.embedding, body.model_id, db.all("SELECT * FROM voiceprints"), body.threshold, body.margin)
+            return match_speaker(body.embedding, body.model_id, db.all("SELECT * FROM voiceprints"), th, mg)
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
 

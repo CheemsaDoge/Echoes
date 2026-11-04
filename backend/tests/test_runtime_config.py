@@ -289,3 +289,102 @@ def test_runtime_config_persistence_across_app_recreation(test_client):
         assert data["margin"] == 0.12
         assert data["vad_config"]["threshold"] == 0.55
         assert data["vad_config"]["end_threshold"] == 0.22
+
+
+def test_runtime_config_vertex_unconfigured_no_crash(test_client):
+    client, _, _ = test_client
+    # Switch to vertexai without credentials/project - should not crash with NameError (os.getenv)
+    resp = client.put("/v1/runtime-config", json={"asr_provider": "vertexai"})
+    assert resp.status_code == 200
+    assert resp.json()["asr_provider"] == "vertexai"
+    # GET should also work
+    get_resp = client.get("/v1/runtime-config")
+    assert get_resp.status_code == 200
+    assert get_resp.json()["asr_provider"] == "vertexai"
+
+
+def test_runtime_config_atomic_rollback_on_failure(test_client):
+    client, app, _ = test_client
+    initial_provider = app.state.settings.asr_provider
+    initial_vad = app.state.settings.vad_provider
+
+    # Send a request with a valid ASR change but invalid VAD threshold
+    fail_resp = client.put("/v1/runtime-config", json={
+        "asr_provider": "disabled",
+        "vad_config": {"threshold": 0.2, "negative_threshold": 0.3}
+    })
+    assert fail_resp.status_code == 422
+    # Verify live settings were NOT modified
+    assert app.state.settings.asr_provider == initial_provider
+    assert app.state.settings.vad_provider == initial_vad
+    # Verify database was NOT modified
+    assert app.state.db.get_setting("asr.provider") is None
+
+
+def test_runtime_config_voice_match_uses_runtime_thresholds(test_client):
+    client, app, _ = test_client
+    from echoledger.models import VoiceMatch
+
+    # Update runtime thresholds to high standards
+    client.put("/v1/runtime-config", json={
+        "similarity_threshold": 0.95,
+        "margin": 0.25,
+    })
+
+    # Enroll a dummy voiceprint
+    spk_id = client.post("/v1/speakers", json={"name": "Alice"}).json()["id"]
+    from conftest import create_session, upload
+    sid = create_session(client, "sess-match-01")
+    upload(client, sid)
+    client.post(f"/v1/sessions/{sid}/close", json={"final_seq": 0})
+    app.state.pipeline.tick()
+    segments = app.state.db.all("SELECT id FROM segments")
+    seg_id = segments[0]["id"]
+
+    dim = 16
+    vec = [1.0] + [0.0] * (dim - 1)
+    client.post(f"/v1/speakers/{spk_id}/voiceprints", json={
+        "model_id": "test_model",
+        "embedding": vec,
+        "evidence_segment_id": seg_id,
+        "consent": True
+    })
+
+    # Test match with similarity ~0.85 (less than 0.95) and threshold omitted
+    query_vec = [0.85] + [float((1 - 0.85**2)**0.5)] + [0.0] * (dim - 2)
+    match_resp = client.post("/v1/speaker-matches", json={
+        "model_id": "test_model",
+        "embedding": query_vec,
+    })
+    assert match_resp.status_code == 200
+    res = match_resp.json()
+    # At default 0.80 this would be accepted, but with runtime 0.95 it must be rejected!
+    assert res["accepted"] is False
+
+    # Explicit override in request still takes precedence
+    override_resp = client.post("/v1/speaker-matches", json={
+        "model_id": "test_model",
+        "embedding": query_vec,
+        "threshold": 0.80,
+    })
+    assert override_resp.status_code == 200
+    assert override_resp.json()["accepted"] is True
+
+
+def test_runtime_config_vad_versioned_profiles(test_client):
+    client, app, _ = test_client
+    initial_active = app.state.db.active_profile()
+
+    # Update VAD settings
+    client.put("/v1/runtime-config", json={
+        "vad_config": {"threshold": 0.48}
+    })
+
+    new_active = app.state.db.active_profile()
+    # Profile ID should be new (versioned) rather than overwriting initial
+    assert new_active["id"] != initial_active["id"]
+    # The old profile still exists in DB for queued batches
+    old_row = app.state.db.one("SELECT * FROM profiles WHERE id=?", (initial_active["id"],))
+    assert old_row is not None
+    assert old_row["active"] == 0
+

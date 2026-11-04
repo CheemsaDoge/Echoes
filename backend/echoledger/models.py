@@ -1,6 +1,6 @@
 from __future__ import annotations
 from typing import Literal
-from pydantic import BaseModel, Field, ConfigDict, model_validator, field_validator
+from pydantic import BaseModel, Field, ConfigDict, model_validator, field_validator, computed_field
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -27,63 +27,81 @@ class ChunkMeta(StrictModel):
 class VadConfig(StrictModel):
     threshold: float = Field(default=.35, ge=.05, le=.95)
     negative_threshold: float = Field(default=.20, ge=0, le=.9)
-    end_threshold: float = Field(default=.20, ge=0, le=.9)
     min_speech_ms: int = Field(default=96, ge=0, le=1000)
     min_silence_ms: int = Field(default=800, ge=32, le=5000)
     pad_ms: int = Field(default=300, ge=0, le=1500)
     retain_uncertain: bool = True
     uncertainty_threshold: float = Field(default=.12, ge=0, le=.9)
-    uncertain_threshold: float = Field(default=.12, ge=0, le=.9)
     max_segment_ms: int = Field(default=30000, ge=1000, le=120000)
     rms_gate: float = Field(default=0.005, ge=0.0, le=1.0)
+
+    @computed_field
+    @property
+    def end_threshold(self) -> float:
+        return self.negative_threshold
+
+    @computed_field
+    @property
+    def uncertain_threshold(self) -> float:
+        return self.uncertainty_threshold
 
     @model_validator(mode="before")
     @classmethod
     def sync_aliases(cls, data):
         if isinstance(data, dict):
-            if "negative_threshold" in data and "end_threshold" not in data:
-                data["end_threshold"] = data["negative_threshold"]
-            elif "end_threshold" in data and "negative_threshold" not in data:
-                data["negative_threshold"] = data["end_threshold"]
-            if "uncertainty_threshold" in data and "uncertain_threshold" not in data:
-                data["uncertain_threshold"] = data["uncertainty_threshold"]
-            elif "uncertain_threshold" in data and "uncertainty_threshold" not in data:
-                data["uncertainty_threshold"] = data["uncertain_threshold"]
+            data = dict(data)
+            if "end_threshold" in data:
+                val = data.pop("end_threshold")
+                if "negative_threshold" not in data:
+                    data["negative_threshold"] = val
+            if "uncertain_threshold" in data:
+                val = data.pop("uncertain_threshold")
+                if "uncertainty_threshold" not in data:
+                    data["uncertainty_threshold"] = val
         return data
 
     @model_validator(mode="after")
     def thresholds(self):
-        if self.negative_threshold >= self.threshold or self.end_threshold >= self.threshold:
+        if self.negative_threshold >= self.threshold:
             raise ValueError("negative_threshold must be below threshold")
-        if self.uncertainty_threshold > self.threshold or self.uncertain_threshold > self.threshold:
+        if self.uncertainty_threshold > self.threshold:
             raise ValueError("uncertainty_threshold must not exceed threshold")
         return self
 
 class VadConfigPatch(StrictModel):
     threshold: float | None = Field(default=None, ge=.05, le=.95)
     negative_threshold: float | None = Field(default=None, ge=0, le=.9)
-    end_threshold: float | None = Field(default=None, ge=0, le=.9)
     min_speech_ms: int | None = Field(default=None, ge=0, le=1000)
     min_silence_ms: int | None = Field(default=None, ge=32, le=5000)
     pad_ms: int | None = Field(default=None, ge=0, le=1500)
     retain_uncertain: bool | None = None
     uncertainty_threshold: float | None = Field(default=None, ge=0, le=.9)
-    uncertain_threshold: float | None = Field(default=None, ge=0, le=.9)
     max_segment_ms: int | None = Field(default=None, ge=1000, le=120000)
     rms_gate: float | None = Field(default=None, ge=0.0, le=1.0)
+
+    @computed_field
+    @property
+    def end_threshold(self) -> float | None:
+        return self.negative_threshold
+
+    @computed_field
+    @property
+    def uncertain_threshold(self) -> float | None:
+        return self.uncertainty_threshold
 
     @model_validator(mode="before")
     @classmethod
     def sync_aliases(cls, data):
         if isinstance(data, dict):
-            if "negative_threshold" in data and "end_threshold" not in data:
-                data["end_threshold"] = data["negative_threshold"]
-            elif "end_threshold" in data and "negative_threshold" not in data:
-                data["negative_threshold"] = data["end_threshold"]
-            if "uncertainty_threshold" in data and "uncertain_threshold" not in data:
-                data["uncertain_threshold"] = data["uncertainty_threshold"]
-            elif "uncertain_threshold" in data and "uncertainty_threshold" not in data:
-                data["uncertainty_threshold"] = data["uncertain_threshold"]
+            data = dict(data)
+            if "end_threshold" in data:
+                val = data.pop("end_threshold")
+                if "negative_threshold" not in data:
+                    data["negative_threshold"] = val
+            if "uncertain_threshold" in data:
+                val = data.pop("uncertain_threshold")
+                if "uncertainty_threshold" not in data:
+                    data["uncertainty_threshold"] = val
         return data
 
 VALID_VAD_PROVIDERS = {
@@ -249,8 +267,8 @@ class VoiceprintCreate(StrictModel):
 class VoiceMatch(StrictModel):
     model_id: str = Field(min_length=1, max_length=120)
     embedding: list[float] = Field(min_length=8, max_length=4096)
-    threshold: float = Field(default=.80, ge=0, le=1)
-    margin: float = Field(default=.10, ge=0, le=1)
+    threshold: float | None = Field(default=None, ge=0, le=1)
+    margin: float | None = Field(default=None, ge=0, le=1)
 
 class EventTypeCreate(StrictModel):
     id: str = Field(pattern=r"^[a-z][a-z0-9_-]{1,39}$")

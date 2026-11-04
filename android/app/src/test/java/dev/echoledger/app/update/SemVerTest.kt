@@ -123,7 +123,7 @@ class SemVerTest {
             "not.a.version",
             "1.2",
             "1",
-            "1.2.3.4",
+            "1.2.3.4.5",
             "1.a.3",
             "a.1.2",
             "1.2.c",
@@ -146,6 +146,9 @@ class SemVerTest {
     fun testToStringFormat() {
         assertEquals("0.1.0", SemVer(0, 1, 0).toString())
         assertEquals("1.2.3-alpha", SemVer(1, 2, 3, "alpha").toString())
+        assertEquals("0.3.11.1", SemVer.parse("v0.3.11.1")!!.toString())
+        assertTrue(SemVer.parse("0.3.11.1")!! > SemVer.parse("0.3.11")!!)
+        assertTrue(SemVer.parse("0.3.11.2")!! > SemVer.parse("0.3.11.1")!!)
     }
 
     @Test

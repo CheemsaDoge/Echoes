@@ -120,7 +120,7 @@ fun AppScreen(
     var activeSettingsSubPage by remember { mutableStateOf<SettingsSubPage?>(null) }
 
     // Top pill toast
-    var toastMessage by remember { mutableStateOf<String?>("已是最新的") }
+    var toastMessage by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(toastMessage) {
         if (toastMessage != null) {
@@ -132,6 +132,7 @@ fun AppScreen(
     LaunchedEffect(repoMessage) {
         if (repoMessage.isNotBlank()) {
             toastMessage = repoMessage
+            vm.repo.message.value = ""
         }
     }
 
@@ -205,9 +206,6 @@ fun AppScreen(
                                 selectedDay = dayNum
                                 val target = runCatching { selectedDate.withDayOfMonth(dayNum) }.getOrNull()
                                 if (target != null) vm.selectDay(target)
-                                if (dayNum == 2 || dayNum == 3 || dayNum == LocalDate.now().dayOfMonth) {
-                                    toastMessage = "已是最新的"
-                                }
                             },
                             isCalendarExpanded = isCalendarExpanded,
                             onToggleCalendarExpanded = { isCalendarExpanded = !isCalendarExpanded },

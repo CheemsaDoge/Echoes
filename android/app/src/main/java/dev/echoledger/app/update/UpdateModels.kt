@@ -9,13 +9,16 @@ data class SemVer(
     val major: Int,
     val minor: Int,
     val patch: Int,
-    val preRelease: String? = null
+    val preRelease: String? = null,
+    val hotfix: Int = 0
 ) : Comparable<SemVer> {
+    var hasFourSegments: Boolean = hotfix > 0
 
     override fun compareTo(other: SemVer): Int {
         if (major != other.major) return major.compareTo(other.major)
         if (minor != other.minor) return minor.compareTo(other.minor)
         if (patch != other.patch) return patch.compareTo(other.patch)
+        if (hotfix != other.hotfix) return hotfix.compareTo(other.hotfix)
 
         return comparePreRelease(preRelease, other.preRelease)
     }
@@ -49,7 +52,8 @@ data class SemVer(
     }
 
     override fun toString(): String {
-        return if (preRelease != null) "$major.$minor.$patch-$preRelease" else "$major.$minor.$patch"
+        val base = if (hotfix > 0 || hasFourSegments) "$major.$minor.$patch.$hotfix" else "$major.$minor.$patch"
+        return if (preRelease != null) "$base-$preRelease" else base
     }
 
     companion object {
@@ -70,15 +74,18 @@ data class SemVer(
             val preRelease = if (dashIndex >= 0) withoutBuild.substring(dashIndex + 1).takeIf { it.isNotEmpty() } else null
 
             val parts = corePart.split('.')
-            if (parts.size != 3) return null
+            if (parts.size != 3 && parts.size != 4) return null
 
             val major = parts[0].toIntOrNull() ?: return null
             val minor = parts[1].toIntOrNull() ?: return null
             val patch = parts[2].toIntOrNull() ?: return null
+            val hotfix = if (parts.size == 4) (parts[3].toIntOrNull() ?: return null) else 0
 
-            if (major < 0 || minor < 0 || patch < 0) return null
+            if (major < 0 || minor < 0 || patch < 0 || hotfix < 0) return null
 
-            return SemVer(major, minor, patch, preRelease)
+            return SemVer(major, minor, patch, preRelease, hotfix).apply {
+                hasFourSegments = (parts.size == 4)
+            }
         }
     }
 }

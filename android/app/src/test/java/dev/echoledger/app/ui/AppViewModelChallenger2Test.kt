@@ -213,11 +213,15 @@ class AppViewModelChallenger2Test {
 
         var streamedBytes = 0
         var cancellationObserved = false
+        val midStreamLatch = java.util.concurrent.CountDownLatch(1)
 
         val mockClient = createMockClient { req ->
             val partialBuffer = Buffer().write(fakePayload, 0, 5120) // Only half payload
             val forwardingSource = object : ForwardingSource(partialBuffer) {
                 override fun read(sink: Buffer, byteCount: Long): Long {
+                    if (streamedBytes >= 5120) {
+                        midStreamLatch.await(2, java.util.concurrent.TimeUnit.SECONDS)
+                    }
                     val read = super.read(sink, byteCount)
                     if (read > 0) streamedBytes += read.toInt()
                     return read
@@ -225,6 +229,7 @@ class AppViewModelChallenger2Test {
 
                 override fun close() {
                     cancellationObserved = true
+                    midStreamLatch.countDown()
                     super.close()
                 }
             }
@@ -261,6 +266,7 @@ class AppViewModelChallenger2Test {
 
         // 2. Cancel download mid-stream
         vm.cancelDownload()
+        midStreamLatch.countDown()
         downloadJob.join()
         testDispatcher.scheduler.advanceUntilIdle()
 

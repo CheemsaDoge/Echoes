@@ -19,10 +19,14 @@ fun gitExecOutput(vararg args: String): String? = try {
     null
 }
 
-val versionMajor = 0
-val versionMinor = 3
-// Tag v0.3.0 base at commit count 49; every commit after it increments patch by 1 (0.3.1, 0.3.2, 0.3.3...)
-val v030BaseCommitCount = 49
+// Base commit 0704b5f is v0.3.11 (commit count 60).
+// Versioning state machine after base commit:
+// - Stage completion ([stage] / [major] / release(stage)): major + 1, minor = 0, patch = 0, remove 4th level
+// - Major feature update (feat!: / [minor]): minor + 1, patch = 0, remove 4th level
+// - Feature update (feat): patch + 1, keep 4th level and reset to 0 (e.g. 0.3.12.0)
+// - Bugfix (fix / other): only increment 4th level (e.g. 0.3.11.1 -> 0.3.11.2)
+val baseCommitSha = "0704b5f"
+val v0311BaseCommitCount = 60
 val overrideVersionCode = project.findProperty("VERSION_CODE")?.toString()?.let { raw ->
     val parsed = raw.trim().toIntOrNull()
     if (parsed == null || parsed < 1) {
@@ -57,10 +61,52 @@ if (isShallowRepo) {
     )
 }
 
-val effectiveCommitCount = (totalGitCommits ?: (v030BaseCommitCount + 1)).coerceAtLeast(v030BaseCommitCount + 1)
-val versionPatch = effectiveCommitCount - v030BaseCommitCount
+fun computeGitSemanticVersion(): String {
+    var major = 0
+    var minor = 3
+    var patch = 11
+    var hotfix: Int? = null
+
+    val logSubjects = gitExecOutput("git", "log", "$baseCommitSha..HEAD", "--reverse", "--format=%s")
+        ?.lines()
+        ?.map { it.trim() }
+        ?.filter { it.isNotEmpty() }
+        .orEmpty()
+
+    for (subject in logSubjects) {
+        val lower = subject.lowercase()
+        when {
+            lower.contains("[stage]") || lower.contains("[major]") || lower.startsWith("release(stage)") || lower.startsWith("feat!!") -> {
+                major += 1
+                minor = 0
+                patch = 0
+                hotfix = null
+            }
+            lower.contains("[minor]") || Regex("""^feat(\([^)]*\))?!:""").containsMatchIn(lower) -> {
+                minor += 1
+                patch = 0
+                hotfix = null
+            }
+            Regex("""^feat(\([^)]*\))?:""").containsMatchIn(lower) -> {
+                patch += 1
+                hotfix = 0
+            }
+            else -> {
+                hotfix = (hotfix ?: 0) + 1
+            }
+        }
+    }
+
+    return if (hotfix != null) {
+        "$major.$minor.$patch.$hotfix"
+    } else {
+        "$major.$minor.$patch"
+    }
+}
+
+val effectiveCommitCount = (totalGitCommits ?: (v0311BaseCommitCount + 1)).coerceAtLeast(v0311BaseCommitCount)
 val computedVersionCode = overrideVersionCode ?: effectiveCommitCount
-val computedVersionName = overrideVersionName ?: "$versionMajor.$versionMinor.$versionPatch"
+val computedVersionName = overrideVersionName ?: computeGitSemanticVersion()
 
 fun nonBlankEnvOrProp(vararg keys: String): String? {
     for (key in keys) {

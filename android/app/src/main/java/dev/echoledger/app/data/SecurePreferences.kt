@@ -27,6 +27,7 @@ class SecurePreferences(
     )
     private val tokenAlias = "echoledger_backend_token_v1"
     private val aiKeyAlias = "echoledger_ai_api_key_v1"
+    private val mcpTokenAlias = "echoledger_mcp_token_v1"
 
     private fun getSecretKey(alias: String): SecretKey {
         if (keyProvider != null) {
@@ -106,4 +107,80 @@ class SecurePreferences(
     var vertexEndpoint: String
         get() = prefs.getString("vertex_endpoint", "") ?: ""
         set(value) { prefs.edit().putString("vertex_endpoint", value.trim()).commit() }
+
+    var mcpToken: String
+        get() = decryptString("mcp_token", mcpTokenAlias)
+        set(value) { encryptString("mcp_token", mcpTokenAlias, value.trim()) }
+
+    var transcriptionMode: String
+        get() = prefs.getString("transcription_mode", "structured") ?: "structured"
+        set(value) { prefs.edit().putString("transcription_mode", value.trim()).commit() }
+
+    var showDemoDataWhenEmpty: Boolean
+        get() = prefs.getBoolean("show_demo_data_empty", true)
+        set(value) { prefs.edit().putBoolean("show_demo_data_empty", value).commit() }
+
+    var vadProvider: String
+        get() = prefs.getString("vad_provider", "silero_v5") ?: "silero_v5"
+        set(value) { prefs.edit().putString("vad_provider", value.trim()).commit() }
+
+    var vadThreshold: Float
+        get() = prefs.getFloat("vad_threshold", 0.55f)
+        set(value) { prefs.edit().putFloat("vad_threshold", value).commit() }
+
+    var vadEndThreshold: Float
+        get() = prefs.getFloat("vad_end_threshold", 0.35f)
+        set(value) { prefs.edit().putFloat("vad_end_threshold", value).commit() }
+
+    var vadMinSpeechMs: Int
+        get() = prefs.getInt("vad_min_speech_ms", 250)
+        set(value) { prefs.edit().putInt("vad_min_speech_ms", value).commit() }
+
+    var vadMinSilenceMs: Int
+        get() = prefs.getInt("vad_min_silence_ms", 400)
+        set(value) { prefs.edit().putInt("vad_min_silence_ms", value).commit() }
+
+    var vadPadMs: Int
+        get() = prefs.getInt("vad_pad_ms", 200)
+        set(value) { prefs.edit().putInt("vad_pad_ms", value).commit() }
+
+    var vadMaxSegmentMs: Int
+        get() = prefs.getInt("vad_max_segment_ms", 25000)
+        set(value) { prefs.edit().putInt("vad_max_segment_ms", value).commit() }
+
+    var vadUncertainThreshold: Float
+        get() = prefs.getFloat("vad_uncertain_threshold", 0.25f)
+        set(value) { prefs.edit().putFloat("vad_uncertain_threshold", value).commit() }
+
+    var vadRmsGate: Float
+        get() = prefs.getFloat("vad_rms_gate", 0.003f)
+        set(value) { prefs.edit().putFloat("vad_rms_gate", value).commit() }
+
+    var voiceprintEnabled: Boolean
+        get() = prefs.getBoolean("voiceprint_enabled", true)
+        set(value) { prefs.edit().putBoolean("voiceprint_enabled", value).commit() }
+
+    var voiceprintModelId: String
+        get() = prefs.getString("voiceprint_model_id", "wespeaker_ecapa_tdnn512") ?: "wespeaker_ecapa_tdnn512"
+        set(value) { prefs.edit().putString("voiceprint_model_id", value.trim()).commit() }
+
+    var voiceprintThreshold: Float
+        get() = prefs.getFloat("voiceprint_threshold", 0.80f)
+        set(value) { prefs.edit().putFloat("voiceprint_threshold", value).commit() }
+
+    var voiceprintMargin: Float
+        get() = prefs.getFloat("voiceprint_margin", 0.10f)
+        set(value) { prefs.edit().putFloat("voiceprint_margin", value).commit() }
+
+    var voiceprintMinSpeechMs: Int
+        get() = prefs.getInt("voiceprint_min_speech_ms", 1500)
+        set(value) { prefs.edit().putInt("voiceprint_min_speech_ms", value).commit() }
+
+    var voiceprintAutoEnroll: Boolean
+        get() = prefs.getBoolean("voiceprint_auto_enroll", false)
+        set(value) { prefs.edit().putBoolean("voiceprint_auto_enroll", value).commit() }
+
+    var voiceprintConsent: Boolean
+        get() = prefs.getBoolean("voiceprint_consent", true)
+        set(value) { prefs.edit().putBoolean("voiceprint_consent", value).commit() }
 }

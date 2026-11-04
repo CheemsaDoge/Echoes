@@ -153,14 +153,14 @@ class SemVerTest {
         val currentSemVer = SemVer.parse(dev.echoledger.app.BuildConfig.VERSION_NAME)
         assertNotNull("BuildConfig.VERSION_NAME (${dev.echoledger.app.BuildConfig.VERSION_NAME}) must be valid SemVer", currentSemVer)
         assertEquals(0, currentSemVer!!.major)
-        assertEquals(2, currentSemVer.minor)
+        assertEquals(3, currentSemVer.minor)
         assertTrue(
             "Patch version (${currentSemVer.patch}) must be >= 1",
             currentSemVer.patch >= 1
         )
         assertTrue(
-            "BuildConfig.VERSION_NAME ($currentSemVer) must be strictly greater than 0.2.0",
-            currentSemVer > SemVer(0, 2, 0)
+            "BuildConfig.VERSION_NAME ($currentSemVer) must be strictly greater than 0.3.0",
+            currentSemVer > SemVer(0, 3, 0)
         )
         assertTrue(
             "BuildConfig.VERSION_CODE (${dev.echoledger.app.BuildConfig.VERSION_CODE}) must be > 1",

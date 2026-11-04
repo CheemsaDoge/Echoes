@@ -86,6 +86,30 @@ class AppViewModel @JvmOverloads constructor(
     val aiTestResult = MutableStateFlow<String?>(null)
     val aiTestSuccess = MutableStateFlow<Boolean?>(null)
 
+    val vadProvider = MutableStateFlow(repo.prefs.vadProvider)
+    val vadThreshold = MutableStateFlow(repo.prefs.vadThreshold)
+    val vadEndThreshold = MutableStateFlow(repo.prefs.vadEndThreshold)
+    val vadMinSpeechMs = MutableStateFlow(repo.prefs.vadMinSpeechMs)
+    val vadMinSilenceMs = MutableStateFlow(repo.prefs.vadMinSilenceMs)
+    val vadPadMs = MutableStateFlow(repo.prefs.vadPadMs)
+    val vadMaxSegmentMs = MutableStateFlow(repo.prefs.vadMaxSegmentMs)
+    val vadUncertainThreshold = MutableStateFlow(repo.prefs.vadUncertainThreshold)
+    val vadRmsGate = MutableStateFlow(repo.prefs.vadRmsGate)
+
+    val voiceprintEnabled = MutableStateFlow(repo.prefs.voiceprintEnabled)
+    val voiceprintModelId = MutableStateFlow(repo.prefs.voiceprintModelId)
+    val voiceprintThreshold = MutableStateFlow(repo.prefs.voiceprintThreshold)
+    val voiceprintMargin = MutableStateFlow(repo.prefs.voiceprintMargin)
+    val voiceprintMinSpeechMs = MutableStateFlow(repo.prefs.voiceprintMinSpeechMs)
+    val voiceprintAutoEnroll = MutableStateFlow(repo.prefs.voiceprintAutoEnroll)
+    val voiceprintConsent = MutableStateFlow(repo.prefs.voiceprintConsent)
+
+    val serverBaseUrl = MutableStateFlow(repo.prefs.baseUrl)
+    val serverToken = MutableStateFlow(repo.prefs.token)
+    val mcpToken = MutableStateFlow(repo.prefs.mcpToken)
+    val transcriptionMode = MutableStateFlow(repo.prefs.transcriptionMode)
+    val showDemoDataWhenEmpty = MutableStateFlow(repo.prefs.showDemoDataWhenEmpty)
+
     fun saveAiConfig(
         mode: String,
         provider: String,
@@ -142,6 +166,135 @@ class AppViewModel @JvmOverloads constructor(
             aiTestResult.value = res.exceptionOrNull()?.message ?: "连接失败"
         }
     }
+
+    fun saveVadConfig(
+        provider: String,
+        threshold: Float,
+        endThreshold: Float,
+        minSpeechMs: Int,
+        minSilenceMs: Int,
+        padMs: Int,
+        maxSegmentMs: Int,
+        uncertainThreshold: Float,
+        rmsGate: Float,
+        presetName: String = ""
+    ) {
+        repo.prefs.vadProvider = provider
+        repo.prefs.vadThreshold = threshold
+        repo.prefs.vadEndThreshold = endThreshold
+        repo.prefs.vadMinSpeechMs = minSpeechMs
+        repo.prefs.vadMinSilenceMs = minSilenceMs
+        repo.prefs.vadPadMs = padMs
+        repo.prefs.vadMaxSegmentMs = maxSegmentMs
+        repo.prefs.vadUncertainThreshold = uncertainThreshold
+        repo.prefs.vadRmsGate = rmsGate
+
+        vadProvider.value = provider
+        vadThreshold.value = threshold
+        vadEndThreshold.value = endThreshold
+        vadMinSpeechMs.value = minSpeechMs
+        vadMinSilenceMs.value = minSilenceMs
+        vadPadMs.value = padMs
+        vadMaxSegmentMs.value = maxSegmentMs
+        vadUncertainThreshold.value = uncertainThreshold
+        vadRmsGate.value = rmsGate
+
+        viewModelScope.launch {
+            if (repo.prefs.operationMode != "standalone" && repo.prefs.token.isNotBlank()) {
+                val vadConfig = JSONObject()
+                    .put("provider", provider)
+                    .put("threshold", threshold)
+                    .put("end_threshold", endThreshold)
+                    .put("min_speech_ms", minSpeechMs)
+                    .put("min_silence_ms", minSilenceMs)
+                    .put("pad_ms", padMs)
+                    .put("max_segment_ms", maxSegmentMs)
+                    .put("uncertain_threshold", uncertainThreshold)
+                    .put("rms_gate", rmsGate)
+                val targetName = presetName.ifBlank { "app_active" }
+                runCatching { repo.saveProfile(targetName, vadConfig) }
+            }
+        }
+        repo.message.value = "VAD 参数已保存并生效"
+    }
+
+    fun saveVoiceprintConfig(
+        enabled: Boolean,
+        modelId: String,
+        threshold: Float,
+        margin: Float,
+        minSpeechMs: Int,
+        autoEnroll: Boolean,
+        consent: Boolean
+    ) {
+        repo.prefs.voiceprintEnabled = enabled
+        repo.prefs.voiceprintModelId = modelId
+        repo.prefs.voiceprintThreshold = threshold
+        repo.prefs.voiceprintMargin = margin
+        repo.prefs.voiceprintMinSpeechMs = minSpeechMs
+        repo.prefs.voiceprintAutoEnroll = autoEnroll
+        repo.prefs.voiceprintConsent = consent
+
+        voiceprintEnabled.value = enabled
+        voiceprintModelId.value = modelId
+        voiceprintThreshold.value = threshold
+        voiceprintMargin.value = margin
+        voiceprintMinSpeechMs.value = minSpeechMs
+        voiceprintAutoEnroll.value = autoEnroll
+        voiceprintConsent.value = consent
+
+        repo.message.value = "声纹识别配置已保存"
+    }
+
+    fun saveServerConfig(url: String, token: String, mcp: String = "") {
+        repo.prefs.baseUrl = url.trim()
+        if (token.isNotBlank()) repo.prefs.token = token.trim()
+        if (mcp.isNotBlank()) repo.prefs.mcpToken = mcp.trim()
+
+        serverBaseUrl.value = repo.prefs.baseUrl
+        serverToken.value = repo.prefs.token
+        mcpToken.value = repo.prefs.mcpToken
+
+        configure(url, token)
+        repo.message.value = "服务端连接配置已保存"
+    }
+
+    fun saveTranscriptionMode(mode: String) {
+        repo.prefs.transcriptionMode = mode
+        transcriptionMode.value = mode
+        repo.message.value = "转写输出模式已更新为 $mode"
+    }
+
+    fun setShowDemoData(show: Boolean) {
+        repo.prefs.showDemoDataWhenEmpty = show
+        showDemoDataWhenEmpty.value = show
+    }
+
+    fun renameSpeaker(oldName: String, newName: String) = act {
+        val allSpeakers = repo.dao.observe("speakers").firstOrNull() ?: emptyList()
+        val entry = allSpeakers.find { JSONObject(it.payload).optString("name") == oldName }
+        val id = entry?.id ?: ("spk_" + System.currentTimeMillis() % 10000)
+        if (repo.prefs.operationMode != "standalone" && repo.prefs.token.isNotBlank()) {
+            runCatching { repo.api.updateSpeaker(id, newName) }
+        }
+        val updatedPayload = JSONObject().put("id", id).put("name", newName).put("voiceprint_count", 1)
+        repo.dao.putCache(listOf(dev.echoledger.app.data.CacheEntry("speakers", id, 0, 0, updatedPayload.toString())))
+        repo.refresh(day.value)
+    }
+
+    fun deleteSpeaker(name: String) = act {
+        val allSpeakers = repo.dao.observe("speakers").firstOrNull() ?: emptyList()
+        val entry = allSpeakers.find { JSONObject(it.payload).optString("name") == name }
+        if (entry != null) {
+            if (repo.prefs.operationMode != "standalone" && repo.prefs.token.isNotBlank()) {
+                runCatching { repo.api.deleteSpeaker(entry.id) }
+            }
+            repo.dao.deleteCacheEntry("speakers", entry.id)
+        }
+        repo.refresh(day.value)
+    }
+
+    fun sweepVad(scenario: String, intervals: String) = evaluate(scenario, intervals, sweep = true)
 
     private var realtime: Job? = null
     private var player: MediaPlayer? = null

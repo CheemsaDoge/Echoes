@@ -76,4 +76,30 @@ class Api(private val prefs: SecurePreferences) {
         })
         awaitClose { source.cancel() }
     }
+
+    suspend fun getRuntimeConfig(): JSONObject? = runCatching {
+        JSONObject(call("/v1/runtime-config", "GET"))
+    }.getOrNull()
+
+    suspend fun updateRuntimeConfig(config: JSONObject): JSONObject? = runCatching {
+        JSONObject(call("/v1/runtime-config", "PUT", config))
+    }.getOrNull()
+
+    suspend fun updateSpeaker(id: String, name: String): JSONObject? = runCatching {
+        val body = JSONObject().put("id", id).put("name", name)
+        JSONObject(call("/v1/speakers/$id", "PUT", body))
+    }.getOrNull()
+
+    suspend fun deleteSpeaker(id: String): Boolean = runCatching {
+        call("/v1/speakers/$id", "DELETE")
+        true
+    }.getOrDefault(false)
+
+    suspend fun enrollVoiceprint(speakerId: String, payload: JSONObject): JSONObject? = runCatching {
+        JSONObject(call("/v1/speakers/$speakerId/voiceprints", "POST", payload))
+    }.getOrNull()
+
+    suspend fun matchSpeaker(payload: JSONObject): JSONObject? = runCatching {
+        JSONObject(call("/v1/speaker-matches", "POST", payload))
+    }.getOrNull()
 }

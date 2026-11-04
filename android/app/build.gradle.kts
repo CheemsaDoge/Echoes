@@ -20,9 +20,9 @@ fun gitExecOutput(vararg args: String): String? = try {
 }
 
 val versionMajor = 0
-val versionMinor = 2
-// Tag v0.2.0 (b6a4b2b) is at commit count 43; every commit after it increments patch by 1 (0.2.1, 0.2.2, 0.2.3...)
-val v020BaseCommitCount = 43
+val versionMinor = 3
+// Tag v0.3.0 base at commit count 49; every commit after it increments patch by 1 (0.3.1, 0.3.2, 0.3.3...)
+val v030BaseCommitCount = 49
 val overrideVersionCode = project.findProperty("VERSION_CODE")?.toString()?.let { raw ->
     val parsed = raw.trim().toIntOrNull()
     if (parsed == null || parsed < 1) {
@@ -57,8 +57,8 @@ if (isShallowRepo) {
     )
 }
 
-val effectiveCommitCount = (totalGitCommits ?: (v020BaseCommitCount + 1)).coerceAtLeast(v020BaseCommitCount + 1)
-val versionPatch = effectiveCommitCount - v020BaseCommitCount
+val effectiveCommitCount = (totalGitCommits ?: (v030BaseCommitCount + 1)).coerceAtLeast(v030BaseCommitCount + 1)
+val versionPatch = effectiveCommitCount - v030BaseCommitCount
 val computedVersionCode = overrideVersionCode ?: effectiveCommitCount
 val computedVersionName = overrideVersionName ?: "$versionMajor.$versionMinor.$versionPatch"
 
@@ -84,6 +84,11 @@ android {
         versionCode = computedVersionCode
         versionName = computedVersionName
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+    testOptions {
+        unitTests.all {
+            it.forkEvery = 1
+        }
     }
     val releaseKeystorePath = nonBlankEnvOrProp("RELEASE_KEYSTORE_PATH", "KEYSTORE_PATH")
 

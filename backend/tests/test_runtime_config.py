@@ -1,8 +1,8 @@
+from conftest import TOKEN, MCP_TOKEN
 import pytest
 from fastapi.testclient import TestClient
 from echoledger.api import create_app
 from echoledger.config import Settings
-from conftest import TOKEN, MCP_TOKEN
 
 @pytest.fixture
 def test_client(tmp_path):
@@ -134,7 +134,7 @@ def test_runtime_config_update_vad(test_client):
     client, app, _ = test_client
 
     patch_vad = {
-        "vad_provider": "webrtc_2",
+        "vad_provider": "passthrough",
         "vad_config": {
             "threshold": 0.50,
             "end_threshold": 0.25,
@@ -150,9 +150,9 @@ def test_runtime_config_update_vad(test_client):
     assert resp.status_code == 200
     data = resp.json()
 
-    assert data["vad_provider"] == "webrtc_2"
-    assert data["vad"]["vad_provider"] == "webrtc_2"
-    assert app.state.settings.vad_provider == "webrtc_2"
+    assert data["vad_provider"] == "passthrough"
+    assert data["vad"]["vad_provider"] == "passthrough"
+    assert app.state.settings.vad_provider == "passthrough"
     cfg = data["vad"]["config"]
     assert cfg["threshold"] == 0.50
     assert cfg["end_threshold"] == 0.25
@@ -254,7 +254,7 @@ def test_runtime_config_persistence_across_app_recreation(test_client):
         "asr_provider": "gemini",
         "gemini_key": "PersistedGeminiSecretKey98765",
         "gemini_model": "gemini-custom-persisted",
-        "vad_provider": "webrtc_3",
+        "vad_provider": "passthrough",
         "speaker_model_id": "nemo_speakernet",
         "similarity_threshold": 0.88,
         "margin": 0.12,
@@ -283,7 +283,7 @@ def test_runtime_config_persistence_across_app_recreation(test_client):
         assert data["gemini_key"] == "***"
         assert new_app.state.settings.gemini_key == "PersistedGeminiSecretKey98765"
         assert data["gemini_model"] == "gemini-custom-persisted"
-        assert data["vad_provider"] == "webrtc_3"
+        assert data["vad_provider"] == "passthrough"
         assert data["speaker_model_id"] == "nemo_speakernet"
         assert data["similarity_threshold"] == 0.88
         assert data["margin"] == 0.12

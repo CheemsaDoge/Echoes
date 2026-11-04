@@ -147,4 +147,20 @@ class SemVerTest {
         assertEquals("0.1.0", SemVer(0, 1, 0).toString())
         assertEquals("1.2.3-alpha", SemVer(1, 2, 3, "alpha").toString())
     }
+
+    @Test
+    fun testBuildConfigVersionIsUpdatedAndMonotonic() {
+        val currentSemVer = SemVer.parse(dev.echoledger.app.BuildConfig.VERSION_NAME)
+        assertNotNull("BuildConfig.VERSION_NAME (${dev.echoledger.app.BuildConfig.VERSION_NAME}) must be valid SemVer", currentSemVer)
+        assertEquals(0, currentSemVer!!.major)
+        assertEquals(2, currentSemVer.minor)
+        assertTrue(
+            "Patch version (${currentSemVer.patch}) must be >= 1",
+            currentSemVer.patch >= 1
+        )
+        assertTrue(
+            "BuildConfig.VERSION_CODE (${dev.echoledger.app.BuildConfig.VERSION_CODE}) must be > 1",
+            dev.echoledger.app.BuildConfig.VERSION_CODE > 1
+        )
+    }
 }

@@ -4,6 +4,32 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
     id("com.google.devtools.ksp")
 }
+fun gitCommitCount(): Int = try {
+    val process = ProcessBuilder("git", "rev-list", "--count", "HEAD")
+        .directory(rootDir)
+        .redirectErrorStream(true)
+        .start()
+    val output = process.inputStream.bufferedReader().use { it.readText().trim() }
+    if (process.waitFor() == 0) output.toIntOrNull() ?: 44 else 44
+} catch (_: Exception) {
+    44
+}
+
+val versionMajor = 0
+val versionMinor = 2
+// Tag v0.2.0 (b6a4b2b) is at commit count 43; every commit after it increments patch by 1 (0.2.1, 0.2.2, 0.2.3...)
+val v020BaseCommitCount = 43
+val totalGitCommits = gitCommitCount()
+val versionPatch = if (totalGitCommits >= v020BaseCommitCount) {
+    totalGitCommits - v020BaseCommitCount
+} else {
+    totalGitCommits.coerceAtLeast(1)
+}
+val computedVersionCode = (project.findProperty("VERSION_CODE") as? String)?.toIntOrNull()
+    ?: totalGitCommits.coerceAtLeast(1)
+val computedVersionName = (project.findProperty("VERSION_NAME") as? String)?.takeIf { it.isNotBlank() }
+    ?: "$versionMajor.$versionMinor.$versionPatch"
+
 android {
     namespace = "dev.echoledger.app"
     compileSdk = 35
@@ -11,8 +37,8 @@ android {
         applicationId = "dev.echoledger.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = computedVersionCode
+        versionName = computedVersionName
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     val releaseKeystorePath = System.getenv("RELEASE_KEYSTORE_PATH")

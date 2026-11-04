@@ -62,6 +62,8 @@ CREATE TABLE IF NOT EXISTS usage(
 CREATE TABLE IF NOT EXISTS calibrations(
  id TEXT PRIMARY KEY, chunk_id TEXT NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
  scenario TEXT NOT NULL, config TEXT NOT NULL, labels TEXT NOT NULL, result TEXT NOT NULL, created_ms INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS kv_settings(
+ key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_ms INTEGER NOT NULL);
 """
 
 def now_ms() -> int:
@@ -126,4 +128,72 @@ class Database:
         return rows[0] if rows else None
 
     def active_profile(self) -> dict:
-        return self.one("SELECT * FROM profiles WHERE active=1")
+        row = self.one("SELECT * FROM profiles WHERE active=1")
+        if not row:
+            with self.connect(immediate=True) as c:
+                if not c.execute("SELECT 1 FROM profiles WHERE id='default-v1'").fetchone():
+                    c.execute("INSERT INTO profiles VALUES(?,?,?,?,1)", ("default-v1", "Conservative", VadConfig().model_dump_json(), now_ms()))
+                else:
+                    c.execute("UPDATE profiles SET active=1 WHERE id='default-v1'")
+            row = self.one("SELECT * FROM profiles WHERE active=1")
+        return row
+
+    def get_setting(self, key: str, default: str | None = None) -> str | None:
+        row = self.one("SELECT value FROM kv_settings WHERE key=?", (key,))
+        return row["value"] if row else default
+
+    def set_setting(self, key: str, value: str) -> None:
+        with self.connect(immediate=True) as c:
+            c.execute("""INSERT INTO kv_settings(key, value, updated_ms) VALUES(?,?,?)
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_ms=excluded.updated_ms""",
+                (key, value, now_ms()))
+
+    def get_all_settings(self) -> dict[str, str]:
+        rows = self.all("SELECT key, value FROM kv_settings")
+        return {r["key"]: r["value"] for r in rows}
+
+    def load_into_settings(self, settings) -> None:
+        for key, val in self.get_all_settings().items():
+            if key == "asr.provider" and hasattr(settings, "asr_provider"):
+                settings.asr_provider = val
+            elif key == "asr.gemini_key" and hasattr(settings, "gemini_key"):
+                settings.gemini_key = val
+            elif key == "asr.gemini_model" and hasattr(settings, "gemini_model"):
+                settings.gemini_model = val
+            elif key == "asr.gemini_mode" and hasattr(settings, "gemini_mode"):
+                settings.gemini_mode = val
+            elif key == "asr.vertex_project" and hasattr(settings, "vertex_project"):
+                settings.vertex_project = val
+            elif key == "asr.vertex_location" and hasattr(settings, "vertex_location"):
+                settings.vertex_location = val
+            elif key == "asr.vertex_model" and hasattr(settings, "vertex_model"):
+                settings.vertex_model = val
+            elif key == "asr.vertex_endpoint" and hasattr(settings, "vertex_endpoint"):
+                settings.vertex_endpoint = val
+            elif key == "asr.vertex_api_key" and hasattr(settings, "vertex_api_key"):
+                settings.vertex_api_key = val
+            elif key == "vad.provider" and hasattr(settings, "vad_provider"):
+                settings.vad_provider = val
+            elif key == "vad.model" and hasattr(settings, "vad_model"):
+                settings.vad_model = val
+            elif key == "voiceprint.speaker_model_id" and hasattr(settings, "speaker_model_id"):
+                settings.speaker_model_id = val
+            elif key == "voiceprint.similarity_threshold" and hasattr(settings, "similarity_threshold"):
+                try:
+                    settings.similarity_threshold = float(val)
+                except ValueError:
+                    pass
+            elif key == "voiceprint.margin" and hasattr(settings, "margin"):
+                try:
+                    settings.margin = float(val)
+                except ValueError:
+                    pass
+            elif key == "voiceprint.min_speech_ms" and hasattr(settings, "min_speech_ms"):
+                try:
+                    settings.min_speech_ms = int(val)
+                except ValueError:
+                    pass
+            elif key == "voiceprint.auto_match_enabled" and hasattr(settings, "auto_match_enabled"):
+                settings.auto_match_enabled = val.lower() == "true"
+            elif key == "voiceprint.consent_required" and hasattr(settings, "consent_required"):
+                settings.consent_required = val.lower() == "true"

@@ -10,7 +10,7 @@ def _default_vertex_model() -> str:
     loc = os.getenv("VERTEX_LOCATION", "global")
     return "gemini-3.8-flash" if loc in {"global", "us", "eu"} else "gemini-2.5-flash"
 
-@dataclass(frozen=True)
+@dataclass
 class Settings:
     data_dir: Path = field(default_factory=lambda: Path(os.getenv("DATA_DIR", "./data")))
     api_token: str = field(default_factory=lambda: os.getenv("API_TOKEN", ""))
@@ -27,6 +27,12 @@ class Settings:
     vertex_endpoint: str = field(default_factory=lambda: os.getenv("VERTEX_ENDPOINT", ""))
     vad_provider: str = field(default_factory=lambda: os.getenv("VAD_PROVIDER", "passthrough"))
     vad_model: str = field(default_factory=lambda: os.getenv("VAD_MODEL_PATH", ""))
+    speaker_model_id: str = field(default_factory=lambda: os.getenv("SPEAKER_MODEL_ID", "wespeaker_ecapa_tdnn512"))
+    similarity_threshold: float = field(default_factory=lambda: float(os.getenv("SPEAKER_SIMILARITY_THRESHOLD", "0.8")))
+    margin: float = field(default_factory=lambda: float(os.getenv("SPEAKER_MARGIN", "0.1")))
+    min_speech_ms: int = field(default_factory=lambda: int(os.getenv("SPEAKER_MIN_SPEECH_MS", "1500")))
+    auto_match_enabled: bool = field(default_factory=lambda: os.getenv("SPEAKER_AUTO_MATCH", "true").lower() == "true")
+    consent_required: bool = field(default_factory=lambda: os.getenv("SPEAKER_CONSENT_REQUIRED", "true").lower() == "true")
     max_upload_bytes: int = 4_000_000
     batch_chunks: int = 4
     batch_wait_seconds: int = 90
@@ -49,6 +55,12 @@ class Settings:
             raise ValueError("Unknown VAD_PROVIDER")
         if self.gemini_mode not in {"transcribe", "structured"}:
             raise ValueError("Unknown GEMINI_MODE")
+        if not (0.1 <= self.similarity_threshold <= 0.99):
+            raise ValueError("similarity_threshold must be between 0.1 and 0.99")
+        if not (0.0 <= self.margin <= 0.5):
+            raise ValueError("margin must be between 0.0 and 0.5")
+        if self.min_speech_ms < 100:
+            raise ValueError("min_speech_ms must be at least 100")
         self.data_dir.mkdir(parents=True, exist_ok=True)
         try:
             self.data_dir.chmod(0o700)

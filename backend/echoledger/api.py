@@ -10,7 +10,9 @@ from .db import Database, emit, now_ms, uid
 from .audio import atomic_write, read_wav, SAMPLE_RATE
 from .models import (SessionCreate, SessionClose, ChunkMeta, ProfileCreate, EvaluationRequest,
                      SpeakerCreate, SpeakerAssign, VoiceprintCreate, VoiceMatch, EventTypeCreate,
-                     EventPatch, MemoryPatch, VadConfig)
+                     EventPatch, MemoryPatch, VadConfig, VadConfigPatch, AsrConfig, AsrConfigPatch,
+                     VadRuntimeConfig, VadRuntimeConfigPatch, VoiceprintConfig, VoiceprintConfigPatch,
+                     RuntimeConfigResponse, RuntimeConfigPatch)
 from .pipeline import Pipeline, plan_batches
 from .worker import run_loop
 from .queries import list_events, get_event, search_memories
@@ -21,8 +23,9 @@ from . import mcp
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings()
-    settings.validate()
     db = Database(settings.data_dir)
+    db.load_into_settings(settings)
+    settings.validate()
     pipeline = Pipeline(db, settings)
     stop = threading.Event()
 
@@ -71,12 +74,230 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def status():
         counts = db.all("SELECT state,COUNT(*) AS count FROM batches GROUP BY state")
         latest = db.one("SELECT COALESCE(MAX(cursor),0) AS cursor FROM changes")
+        active_prof = db.active_profile()
+        vad_active_profile = {
+            "id": active_prof["id"],
+            "name": active_prof["name"],
+        } if active_prof else None
+        voiceprint_config = {
+            "speaker_model_id": settings.speaker_model_id,
+            "similarity_threshold": settings.similarity_threshold,
+            "margin": settings.margin,
+            "min_speech_ms": settings.min_speech_ms,
+            "auto_match_enabled": settings.auto_match_enabled,
+            "consent_required": settings.consent_required,
+        }
         return {"version": "0.1.0", "asr_provider": settings.asr_provider,
                 "asr_configured": settings.asr_provider == "mock" or (settings.asr_provider == "gemini" and bool(settings.gemini_key)) or (settings.asr_provider == "vertexai" and bool(settings.vertex_project or settings.vertex_api_key or settings.vertex_credentials or settings.vertex_endpoint or os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or getattr(pipeline.transcriber, "project", ""))),
-                "vad_provider": settings.vad_provider, "voice_embedding_provider": "not_configured",
-                "speaker_identity": "manual-or-external-embedding", "memory_mode": "evidence-excerpts-with-human-confirmation",
+                "vad_provider": settings.vad_provider, "vad_active_profile": vad_active_profile,
+                "voice_embedding_provider": "not_configured",
+                "speaker_identity": "manual-or-external-embedding", "voiceprint_config": voiceprint_config,
+                "memory_mode": "evidence-excerpts-with-human-confirmation",
                 "mcp_enabled": bool(settings.mcp_token), "batch_counts": counts, "cursor": latest["cursor"],
                 "raw_audio_policy": "retained-until-explicit-delete", "is_demo": settings.asr_provider == "mock"}
+
+    def _build_runtime_config_response() -> RuntimeConfigResponse:
+        active_prof = db.active_profile()
+        vad_cfg = VadConfig.model_validate_json(active_prof["config"])
+
+        has_gemini = bool(settings.gemini_key)
+        gemini_masked = "***" if has_gemini else ""
+
+        has_vertex_key = bool(settings.vertex_api_key)
+        vertex_key_masked = "***" if has_vertex_key else ""
+
+        asr_configured = settings.asr_provider == "mock" or (settings.asr_provider == "gemini" and bool(settings.gemini_key)) or (settings.asr_provider == "vertexai" and bool(settings.vertex_project or settings.vertex_api_key or settings.vertex_credentials or settings.vertex_endpoint or os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or getattr(pipeline.transcriber, "project", "")))
+
+        asr_sub = AsrConfig(
+            asr_provider=settings.asr_provider,
+            gemini_key=gemini_masked,
+            has_gemini_key=has_gemini,
+            gemini_model=settings.gemini_model,
+            gemini_mode=settings.gemini_mode,
+            vertex_project=settings.vertex_project,
+            vertex_location=settings.vertex_location,
+            vertex_model=settings.vertex_model,
+            vertex_endpoint=settings.vertex_endpoint,
+            vertex_api_key=vertex_key_masked,
+            has_vertex_api_key=has_vertex_key,
+            asr_configured=asr_configured,
+        )
+
+        vad_sub = VadRuntimeConfig(
+            vad_provider=settings.vad_provider,
+            vad_model=settings.vad_model,
+            active_profile_id=active_prof["id"],
+            active_profile_name=active_prof["name"],
+            config=vad_cfg,
+        )
+
+        voice_sub = VoiceprintConfig(
+            speaker_model_id=settings.speaker_model_id,
+            similarity_threshold=settings.similarity_threshold,
+            margin=settings.margin,
+            min_speech_ms=settings.min_speech_ms,
+            auto_match_enabled=settings.auto_match_enabled,
+            consent_required=settings.consent_required,
+        )
+
+        return RuntimeConfigResponse(
+            asr=asr_sub,
+            vad=vad_sub,
+            voiceprint=voice_sub,
+            asr_provider=settings.asr_provider,
+            gemini_key=gemini_masked,
+            has_gemini_key=has_gemini,
+            gemini_model=settings.gemini_model,
+            gemini_mode=settings.gemini_mode,
+            vertex_project=settings.vertex_project,
+            vertex_location=settings.vertex_location,
+            vertex_model=settings.vertex_model,
+            vertex_endpoint=settings.vertex_endpoint,
+            vertex_api_key=vertex_key_masked,
+            has_vertex_api_key=has_vertex_key,
+            vad_provider=settings.vad_provider,
+            vad_model=settings.vad_model,
+            vad_config=vad_cfg,
+            speaker_model_id=settings.speaker_model_id,
+            similarity_threshold=settings.similarity_threshold,
+            margin=settings.margin,
+            min_speech_ms=settings.min_speech_ms,
+            auto_match_enabled=settings.auto_match_enabled,
+            consent_required=settings.consent_required,
+        )
+
+    @router.get("/runtime-config", response_model=RuntimeConfigResponse)
+    def get_runtime_config():
+        return _build_runtime_config_response()
+
+    @router.put("/runtime-config", response_model=RuntimeConfigResponse)
+    def update_runtime_config(body: RuntimeConfigPatch):
+        asr_patch = body.asr or AsrConfigPatch()
+        vad_patch = body.vad or VadRuntimeConfigPatch()
+        vp_patch = body.voiceprint or VoiceprintConfigPatch()
+
+        asr_prov = body.asr_provider or asr_patch.asr_provider
+        g_key = body.gemini_key if body.gemini_key is not None else asr_patch.gemini_key
+        g_model = body.gemini_model if body.gemini_model is not None else asr_patch.gemini_model
+        g_mode = body.gemini_mode or asr_patch.gemini_mode
+        v_proj = body.vertex_project if body.vertex_project is not None else asr_patch.vertex_project
+        v_loc = body.vertex_location if body.vertex_location is not None else asr_patch.vertex_location
+        v_model = body.vertex_model if body.vertex_model is not None else asr_patch.vertex_model
+        v_endp = body.vertex_endpoint if body.vertex_endpoint is not None else asr_patch.vertex_endpoint
+        v_key = body.vertex_api_key if body.vertex_api_key is not None else asr_patch.vertex_api_key
+
+        vad_prov = body.vad_provider or vad_patch.vad_provider
+        vad_mod = body.vad_model if body.vad_model is not None else vad_patch.vad_model
+        v_cfg_patch = body.vad_config or body.config or vad_patch.config
+
+        spk_mod = body.speaker_model_id or vp_patch.speaker_model_id
+        sim_th = body.similarity_threshold if body.similarity_threshold is not None else vp_patch.similarity_threshold
+        mrg = body.margin if body.margin is not None else vp_patch.margin
+        min_spk_ms = body.min_speech_ms if body.min_speech_ms is not None else vp_patch.min_speech_ms
+        auto_m = body.auto_match_enabled if body.auto_match_enabled is not None else vp_patch.auto_match_enabled
+        cons_req = body.consent_required if body.consent_required is not None else vp_patch.consent_required
+
+        def is_mask(val: str | None) -> bool:
+            if not val:
+                return False
+            s = val.strip()
+            return len(s) > 0 and all(c == '*' for c in s)
+
+        if asr_prov is not None:
+            settings.asr_provider = asr_prov
+            db.set_setting("asr.provider", asr_prov)
+
+        if g_key is not None:
+            if not is_mask(g_key):
+                settings.gemini_key = g_key.strip()
+                db.set_setting("asr.gemini_key", settings.gemini_key)
+
+        if g_model is not None:
+            settings.gemini_model = g_model
+            db.set_setting("asr.gemini_model", g_model)
+
+        if g_mode is not None:
+            settings.gemini_mode = g_mode
+            db.set_setting("asr.gemini_mode", g_mode)
+
+        if v_proj is not None:
+            settings.vertex_project = v_proj
+            db.set_setting("asr.vertex_project", v_proj)
+
+        if v_loc is not None:
+            settings.vertex_location = v_loc
+            db.set_setting("asr.vertex_location", v_loc)
+
+        if v_model is not None:
+            settings.vertex_model = v_model
+            db.set_setting("asr.vertex_model", v_model)
+
+        if v_endp is not None:
+            settings.vertex_endpoint = v_endp
+            db.set_setting("asr.vertex_endpoint", v_endp)
+
+        if v_key is not None:
+            if not is_mask(v_key):
+                settings.vertex_api_key = v_key.strip()
+                db.set_setting("asr.vertex_api_key", settings.vertex_api_key)
+
+        if vad_prov is not None:
+            settings.vad_provider = vad_prov
+            db.set_setting("vad.provider", vad_prov)
+
+        if vad_mod is not None:
+            settings.vad_model = vad_mod
+            db.set_setting("vad.model", vad_mod)
+
+        if spk_mod is not None:
+            settings.speaker_model_id = spk_mod
+            db.set_setting("voiceprint.speaker_model_id", spk_mod)
+
+        if sim_th is not None:
+            settings.similarity_threshold = sim_th
+            db.set_setting("voiceprint.similarity_threshold", str(sim_th))
+
+        if mrg is not None:
+            settings.margin = mrg
+            db.set_setting("voiceprint.margin", str(mrg))
+
+        if min_spk_ms is not None:
+            settings.min_speech_ms = min_spk_ms
+            db.set_setting("voiceprint.min_speech_ms", str(min_spk_ms))
+
+        if auto_m is not None:
+            settings.auto_match_enabled = auto_m
+            db.set_setting("voiceprint.auto_match_enabled", str(auto_m).lower())
+
+        if cons_req is not None:
+            settings.consent_required = cons_req
+            db.set_setting("voiceprint.consent_required", str(cons_req).lower())
+
+        if v_cfg_patch is not None:
+            active_prof = db.active_profile()
+            cur_vad = json.loads(active_prof["config"])
+            patch_vad = {k: v for k, v in v_cfg_patch.model_dump().items() if v is not None}
+            cur_vad.update(patch_vad)
+            try:
+                updated_cfg = VadConfig.model_validate(cur_vad)
+            except (ValueError, ValidationError) as exc:
+                raise HTTPException(422, f"Invalid VAD config: {exc}") from exc
+            with db.connect(immediate=True) as c:
+                c.execute("UPDATE profiles SET config=? WHERE id=?", (updated_cfg.model_dump_json(), active_prof["id"]))
+                emit(c, "profile.updated", active_prof["id"])
+
+        try:
+            settings.validate()
+        except ValueError as exc:
+            raise HTTPException(422, f"Configuration validation failed: {exc}") from exc
+
+        pipeline.reload_transcriber()
+        pipeline.reload_scorer()
+
+        with db.connect(immediate=True) as c:
+            emit(c, "runtime_config.updated", "runtime-config")
+
+        return _build_runtime_config_response()
 
     @router.post("/sessions")
     def create_session(body: SessionCreate):

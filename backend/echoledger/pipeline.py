@@ -81,18 +81,29 @@ class Pipeline:
     def __init__(self, db: Database, settings: Settings, scorer=None, transcriber: Transcriber | None = None):
         self.db, self.settings = db, settings
         self._scorer = scorer
-        self.transcriber = transcriber or {
+        self._explicit_transcriber = transcriber is not None
+        self.transcriber = transcriber or self.build_transcriber()
+
+    def build_transcriber(self) -> Transcriber:
+        return {
             "disabled": lambda: DisabledTranscriber(), "mock": lambda: MockTranscriber(),
-            "gemini": lambda: GeminiTranscriber(settings.gemini_key, settings.gemini_model, settings.gemini_mode),
+            "gemini": lambda: GeminiTranscriber(self.settings.gemini_key, self.settings.gemini_model, self.settings.gemini_mode),
             "vertexai": lambda: VertexAiTranscriber(
-                project=settings.vertex_project,
-                location=settings.vertex_location,
-                model=settings.vertex_model,
-                credentials_path=settings.vertex_credentials,
-                api_key=settings.vertex_api_key,
-                endpoint=settings.vertex_endpoint,
+                project=self.settings.vertex_project,
+                location=self.settings.vertex_location,
+                model=self.settings.vertex_model,
+                credentials_path=self.settings.vertex_credentials,
+                api_key=self.settings.vertex_api_key,
+                endpoint=self.settings.vertex_endpoint,
             ),
-        }[settings.asr_provider]()
+        }[self.settings.asr_provider]()
+
+    def reload_transcriber(self) -> None:
+        if not self._explicit_transcriber:
+            self.transcriber = self.build_transcriber()
+
+    def reload_scorer(self) -> None:
+        self._scorer = make_scorer(self.settings.vad_provider, self.settings.vad_model)
 
     @property
     def scorer(self):

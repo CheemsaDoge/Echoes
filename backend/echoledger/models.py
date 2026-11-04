@@ -1,6 +1,6 @@
 from __future__ import annotations
 from typing import Literal
-from pydantic import BaseModel, Field, ConfigDict, model_validator
+from pydantic import BaseModel, Field, ConfigDict, model_validator, field_validator
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -27,18 +27,190 @@ class ChunkMeta(StrictModel):
 class VadConfig(StrictModel):
     threshold: float = Field(default=.35, ge=.05, le=.95)
     negative_threshold: float = Field(default=.20, ge=0, le=.9)
+    end_threshold: float = Field(default=.20, ge=0, le=.9)
     min_speech_ms: int = Field(default=96, ge=0, le=1000)
     min_silence_ms: int = Field(default=800, ge=32, le=5000)
     pad_ms: int = Field(default=300, ge=0, le=1500)
     retain_uncertain: bool = True
     uncertainty_threshold: float = Field(default=.12, ge=0, le=.9)
+    uncertain_threshold: float = Field(default=.12, ge=0, le=.9)
+    max_segment_ms: int = Field(default=30000, ge=1000, le=120000)
+    rms_gate: float = Field(default=0.005, ge=0.0, le=1.0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def sync_aliases(cls, data):
+        if isinstance(data, dict):
+            if "negative_threshold" in data and "end_threshold" not in data:
+                data["end_threshold"] = data["negative_threshold"]
+            elif "end_threshold" in data and "negative_threshold" not in data:
+                data["negative_threshold"] = data["end_threshold"]
+            if "uncertainty_threshold" in data and "uncertain_threshold" not in data:
+                data["uncertain_threshold"] = data["uncertainty_threshold"]
+            elif "uncertain_threshold" in data and "uncertainty_threshold" not in data:
+                data["uncertainty_threshold"] = data["uncertain_threshold"]
+        return data
+
     @model_validator(mode="after")
     def thresholds(self):
-        if self.negative_threshold >= self.threshold:
+        if self.negative_threshold >= self.threshold or self.end_threshold >= self.threshold:
             raise ValueError("negative_threshold must be below threshold")
-        if self.uncertainty_threshold > self.threshold:
+        if self.uncertainty_threshold > self.threshold or self.uncertain_threshold > self.threshold:
             raise ValueError("uncertainty_threshold must not exceed threshold")
         return self
+
+class VadConfigPatch(StrictModel):
+    threshold: float | None = Field(default=None, ge=.05, le=.95)
+    negative_threshold: float | None = Field(default=None, ge=0, le=.9)
+    end_threshold: float | None = Field(default=None, ge=0, le=.9)
+    min_speech_ms: int | None = Field(default=None, ge=0, le=1000)
+    min_silence_ms: int | None = Field(default=None, ge=32, le=5000)
+    pad_ms: int | None = Field(default=None, ge=0, le=1500)
+    retain_uncertain: bool | None = None
+    uncertainty_threshold: float | None = Field(default=None, ge=0, le=.9)
+    uncertain_threshold: float | None = Field(default=None, ge=0, le=.9)
+    max_segment_ms: int | None = Field(default=None, ge=1000, le=120000)
+    rms_gate: float | None = Field(default=None, ge=0.0, le=1.0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def sync_aliases(cls, data):
+        if isinstance(data, dict):
+            if "negative_threshold" in data and "end_threshold" not in data:
+                data["end_threshold"] = data["negative_threshold"]
+            elif "end_threshold" in data and "negative_threshold" not in data:
+                data["negative_threshold"] = data["end_threshold"]
+            if "uncertainty_threshold" in data and "uncertain_threshold" not in data:
+                data["uncertain_threshold"] = data["uncertainty_threshold"]
+            elif "uncertain_threshold" in data and "uncertainty_threshold" not in data:
+                data["uncertainty_threshold"] = data["uncertain_threshold"]
+        return data
+
+VALID_VAD_PROVIDERS = {
+    "passthrough", "energy_demo", "silero", "silero_v5", "silero_v4", "silero_v3",
+    "ten_vad", "ten_vad_int8", "webrtc", "webrtc_0", "webrtc_1", "webrtc_2", "webrtc_3"
+}
+
+class AsrConfig(StrictModel):
+    asr_provider: Literal["disabled", "mock", "gemini", "vertexai"] = "disabled"
+    gemini_key: str = ""
+    has_gemini_key: bool = False
+    gemini_model: str = "gemini-3.5-transcribe"
+    gemini_mode: Literal["transcribe", "structured"] = "transcribe"
+    vertex_project: str = ""
+    vertex_location: str = "global"
+    vertex_model: str = "gemini-3.8-flash"
+    vertex_endpoint: str = ""
+    vertex_api_key: str = ""
+    has_vertex_api_key: bool = False
+    asr_configured: bool = False
+
+class AsrConfigPatch(StrictModel):
+    asr_provider: Literal["disabled", "mock", "gemini", "vertexai"] | None = None
+    gemini_key: str | None = None
+    gemini_model: str | None = None
+    gemini_mode: Literal["transcribe", "structured"] | None = None
+    vertex_project: str | None = None
+    vertex_location: str | None = None
+    vertex_model: str | None = None
+    vertex_endpoint: str | None = None
+    vertex_api_key: str | None = None
+
+class VadRuntimeConfig(StrictModel):
+    vad_provider: str = "passthrough"
+    vad_model: str = ""
+    active_profile_id: str | None = None
+    active_profile_name: str | None = None
+    config: VadConfig = Field(default_factory=VadConfig)
+
+class VadRuntimeConfigPatch(StrictModel):
+    vad_provider: str | None = None
+    vad_model: str | None = None
+    config: VadConfigPatch | None = None
+
+    @field_validator("vad_provider")
+    @classmethod
+    def validate_vad_prov(cls, v: str | None) -> str | None:
+        if v is not None and v not in VALID_VAD_PROVIDERS:
+            raise ValueError(f"Unknown VAD provider: {v}")
+        return v
+
+class VoiceprintConfig(StrictModel):
+    speaker_model_id: str = Field(default="wespeaker_ecapa_tdnn512", min_length=1, max_length=120)
+    similarity_threshold: float = Field(default=0.8, ge=0.1, le=0.99)
+    margin: float = Field(default=0.1, ge=0.0, le=0.5)
+    min_speech_ms: int = Field(default=1500, ge=100, le=60000)
+    auto_match_enabled: bool = True
+    consent_required: bool = True
+
+class VoiceprintConfigPatch(StrictModel):
+    speaker_model_id: str | None = Field(default=None, min_length=1, max_length=120)
+    similarity_threshold: float | None = Field(default=None, ge=0.1, le=0.99)
+    margin: float | None = Field(default=None, ge=0.0, le=0.5)
+    min_speech_ms: int | None = Field(default=None, ge=100, le=60000)
+    auto_match_enabled: bool | None = None
+    consent_required: bool | None = None
+
+class RuntimeConfigResponse(StrictModel):
+    asr: AsrConfig
+    vad: VadRuntimeConfig
+    voiceprint: VoiceprintConfig
+
+    # Top-level flattened fields for client convenience
+    asr_provider: Literal["disabled", "mock", "gemini", "vertexai"]
+    gemini_key: str
+    has_gemini_key: bool
+    gemini_model: str
+    gemini_mode: Literal["transcribe", "structured"]
+    vertex_project: str
+    vertex_location: str
+    vertex_model: str
+    vertex_endpoint: str
+    vertex_api_key: str
+    has_vertex_api_key: bool
+    vad_provider: str
+    vad_model: str
+    vad_config: VadConfig
+    speaker_model_id: str
+    similarity_threshold: float
+    margin: float
+    min_speech_ms: int
+    auto_match_enabled: bool
+    consent_required: bool
+
+class RuntimeConfigPatch(StrictModel):
+    asr: AsrConfigPatch | None = None
+    vad: VadRuntimeConfigPatch | None = None
+    voiceprint: VoiceprintConfigPatch | None = None
+
+    asr_provider: Literal["disabled", "mock", "gemini", "vertexai"] | None = None
+    gemini_key: str | None = None
+    gemini_model: str | None = None
+    gemini_mode: Literal["transcribe", "structured"] | None = None
+    vertex_project: str | None = None
+    vertex_location: str | None = None
+    vertex_model: str | None = None
+    vertex_endpoint: str | None = None
+    vertex_api_key: str | None = None
+
+    vad_provider: str | None = None
+    vad_model: str | None = None
+    vad_config: VadConfigPatch | None = None
+    config: VadConfigPatch | None = None
+
+    speaker_model_id: str | None = Field(default=None, min_length=1, max_length=120)
+    similarity_threshold: float | None = Field(default=None, ge=0.1, le=0.99)
+    margin: float | None = Field(default=None, ge=0.0, le=0.5)
+    min_speech_ms: int | None = Field(default=None, ge=100, le=60000)
+    auto_match_enabled: bool | None = None
+    consent_required: bool | None = None
+
+    @field_validator("vad_provider")
+    @classmethod
+    def validate_vad_prov(cls, v: str | None) -> str | None:
+        if v is not None and v not in VALID_VAD_PROVIDERS:
+            raise ValueError(f"Unknown VAD provider: {v}")
+        return v
 
 class ProfileCreate(StrictModel):
     name: str = Field(min_length=1, max_length=80)

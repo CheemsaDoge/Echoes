@@ -102,7 +102,7 @@ Hemory 是一个面向全天候被动环境录音、上下文理解与多主体�
 | **进程内 IPC (数据面)** | `hemory/recording/state`<br>`hemory/recording/events`<br>`hemory/recording/metering`<br>`hemory/recording/segments` | Android EventChannel | Continuous Event Stream (JSON / Map) | 单向高频事件流；主线程非阻塞派发 | 7 态录音状态广播、分贝计量（30-90 dB）、音频切片落盘元数据回传 |
 | **边缘-云端 (录音采集)** | `POST /tenants/{tenant_id}/vaults/{vault_id}/recordings/upload` | HTTP/2 Multipart Form-Data | 6 段表单：元数据 JSON + 16kHz AAC ADTS 二进制流 | WorkManager 保证投递；指数退避；租约拒绝码（`no_primary` 等） | 客户端录音切片向云端摄取管道传输，伴随双重租户身份安全校验 |
 | **边缘-云端 (管理控制)** | `/api/v1/auth/*`<br>`/tenants/*`<br>`/primary-device`<br>`/users/me/listening-schedule` | HTTPS RESTful JSON | 强类型 JSON Request / Response Schema | JWT Bearer 认证；乐观并发控制（`x-hemory-listening-schedule-revision`） | 账户鉴权、租户切换、主设备租约抢占、录音日程三方合并自愈 |
-| **边缘-云端 (智能体对话)** | `POST /chat/threads/{id}/turns` | Server-Sent Events (SSE) | Wire Events: `turn_progress`, `tool_call_*`, `token`, `turn_completed` | 长连接全双工；支持 `DELETE /turns/{turn_id}` 客户端中断 | 流式多阶段对话推理；内建工具调用（`search_memory`、`search_sections`）；结构化卡片渲染 |
+| **边缘-云端 (智能体对话)** | `POST /chat/threads/{thread_id}/turns` | Server-Sent Events (SSE) | Wire Events: `turn_progress`, `tool_call_*`, `text_delta` (or `token`), `turn_completed` | 长连接流式响应；支持 `POST /chat/threads/{thread_id}/turns/{turn_id}/cancel` 客户端中断 | 流式多阶段对话推理；内建工具调用（`search_memory`、`search_sections`）；结构化卡片渲染 |
 | **智能体互联 (开放协议)** | `POST <dp_base_url>/mcp` | Model Context Protocol (JSON-RPC 2.0) | 标准 MCP Tools / Resources / Prompts 协议帧 | 独立 MCP Bearer API Key 校验；每 DP 节点独立端点 | 赋能 Claude Desktop、Cursor 等外部 AI 工具无缝检索个人记忆知识库 |
 
 ## 2. 客户端双层架构工程规范 (Client Dual-Layer Architecture Specification)
@@ -224,6 +224,7 @@ The Watchdog Dead-Man Switch protects the user against silent audio recording fa
 The watchdog operates on two strict timing constants:
 - **Heartbeat Renew Interval:** `30,000 ms` (30 seconds). Managed by a Kotlin Coroutine running inside `RecordingForegroundService`.
 - **Watchdog Lease Timeout:** `60,000 ms` (60 seconds). Set on `AlarmManager` with `AlarmManager.ELAPSED_REALTIME_WAKEUP`.
+  *(Bytecode Parameter Note: Early exploratory survey notes referenced a 600,000 ms grace period, but direct bytecode verification in `of/B.java` (`f36903c = 60L`) and `j8/w.java` (`lease=60s`) confirms 60 seconds as the production lease timeout).*
 - **Stall Window:** If the audio thread or the heartbeat coroutine freezes for $> 60\text{ s}$, the alarm executes.
 
 #### 2.2.2 Exact Alarm Re-Arming Implementation (`of.B` & `j8.w`)
@@ -321,16 +322,26 @@ fun scheduleHeartbeat(recordingId: String, elapsedMs: Long, leaseSeconds: Long) 
 #### 2.2.3 Alert Channel & Recovery Dispatch (`DeadManSwitchAlarmReceiver`)
 When the 60-second lease expires without renewal:
 1. `DeadManSwitchAlarmReceiver` receives `net.hemory.app.DEAD_MAN_SWITCH_FIRE`.
-2. Inspects `RecordingForegroundService.f36186Y` (static volatile boolean indicating active service execution).
-3. If `f36186Y == true`, logs `"前台聆听服务仍活跃，判定为心跳冻结误报，不投递"` and aborts.
-4. If `f36186Y == false` (service dead, frozen, or destroyed):
-   - Creates Notification Channel `"hemory_recording_alerts"` with `IMPORTANCE_HIGH` (4).
-   - Builds high-priority heads-up notification with ID `1214606592`.
-   - Attaches `PendingIntent` for `MainActivity` with:
-     - `Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP` (`805306368`).
-     - Extra: `"hemory.listening.action.source" = "deadSwitchNotification"`.
-     - Extra: `"hemory.listening.action.createdAtMs" = System.currentTimeMillis()`.
-5. Upon user tap or system dispatch, `MainActivity.onNewIntent()` receives the intent and signals Flutter to execute self-healing: finalize the dangling session in SQLite and restart capture.
+2. **Audio Frame Monotonic Liveness Evaluation**:
+   Rather than relying solely on the static service flag (`f36186Y`), the receiver evaluates the monotonic audio frame timestamp `RecordingForegroundService.lastAudioFrameTimestampMs` (updated on every successful `AudioRecord.read()` buffer):
+   ```kotlin
+   val lastFrame = RecordingForegroundService.lastAudioFrameTimestampMs
+   val now = SystemClock.elapsedRealtime()
+   val isServiceRunning = RecordingForegroundService.f36186Y
+   val frameStalenessMs = now - lastFrame
+   ```
+3. **Discriminator Logic & Mandatory Lease Re-Arm**:
+   - **Branch A: Audio HAL Freeze (Fatal Deadlock)**: If `isServiceRunning == true` BUT `frameStalenessMs > 45_000L` (audio frames have stopped advancing for $>45\text{s}$), the audio capture thread is hung (e.g. kernel audio driver lockup or Audio HAL deadlock). The receiver treats this as an unrecoverable Audio HAL freeze, logs `"Audio HAL 读阻塞/音频流冻结，触发自愈"`, terminates the hung recording process, and triggers self-healing process restart.
+   - **Branch B: False Alarm (OEM Coroutine Throttle / Deep Sleep)**: If `isServiceRunning == true` AND `frameStalenessMs <= 45_000L` (valid audio frames are actively advancing within the last 45s), the recording engine is healthy and only the background coroutine timer was delayed by OEM battery saver. The receiver logs `"前台聆听服务与音频帧活跃，判定为心跳延迟误报"`.
+     - **Mandatory Re-Arm Guarantee**: To prevent permanently extinguishing the watchdog after a single throttled tick, the receiver **ALWAYS re-arms the AlarmManager lease for another 60 seconds** (`scheduler.scheduleHeartbeat(recordingId, elapsedMs, 60L)`).
+   - **Branch C: Process Terminated / LMK Killed**: If `isServiceRunning == false`:
+     - Creates Notification Channel `"hemory_recording_alerts"` with `IMPORTANCE_HIGH` (4).
+     - Builds high-priority heads-up notification with ID `1214606592`.
+     - Attaches `PendingIntent` for `MainActivity` with:
+       - `Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP` (`805306368`).
+       - Extra: `"hemory.listening.action.source" = "deadSwitchNotification"`.
+       - Extra: `"hemory.listening.action.createdAtMs" = System.currentTimeMillis()`.
+4. Upon user tap or system dispatch, `MainActivity.onNewIntent()` receives the intent and signals Flutter to execute self-healing: finalize the dangling session in SQLite and restart capture.
 
 ---
 
@@ -452,6 +463,11 @@ const MethodChannel nativeBridgeChannel = MethodChannel('hemory/native_bridge');
 
 | Method Name | Direction | Request Payload Schema | Response Payload Schema | Error Codes |
 |---|---|---|---|---|
+| `startRecording` | Flutter $\to$ Native | `{"recordingReason": String, "customMetadata": Map<String, dynamic>?}` | `bool` (`true` on success) | `SERVICE_ALREADY_ACTIVE`, `MIC_PERMISSION_DENIED`, `STORAGE_FULL` |
+| `stopRecording` | Flutter $\to$ Native | `{"reason": String?}` or `null` | `bool` (`true` on success) | `SERVICE_NOT_ACTIVE` |
+| `pauseRecording` | Flutter $\to$ Native | `null` | `bool` (`true` on success) | `ILLEGAL_STATE` |
+| `resumeRecording` | Flutter $\to$ Native | `null` | `bool` (`true` on success) | `ILLEGAL_STATE` |
+| `getRecordingState` | Flutter $\to$ Native | `null` | `String` (`"idle"`, `"recording"`, `"paused"`, `"error"`) | none |
 | `configureNativeRuntime` | Flutter $\to$ Native | `{"environment": String, "debugLogging": bool, "sentryDsn": String?}` | `bool` (`true` on success) | `INVALID_CONFIG`, `NATIVE_INIT_FAILED` |
 | `configureRuntimeEnvironment` | Flutter $\to$ Native | `{"baseUrl": String, "tenantId": String, "vaultId": String}` | `bool` | `INVALID_ARGUMENTS` |
 | `storeAuth` | Flutter $\to$ Native | 7-Tuple Map (see §3.1.2 below) | `bool` | `MISSING_TUPLE_FIELD`, `KEYSTORE_ERROR` |
@@ -624,10 +640,10 @@ Defined in native enum `hf.i` and mirrored in Dart:
 1. `Idle` (wire: `"idle"`): Hardware released, service inactive, timers cleared.
 2. `Activating` (wire: `"activating"`): Service starting, WakeLock acquired, AudioRecord initializing, MediaCodec configuring.
 3. `Recording` (wire: `"recording"`): Audio capturing, MediaCodec streaming, chunks slicing, watchdog heartbeat beating.
-4. `Recovering` (wire: `"recovering"`): Transient interruption (e.g. phone call or transient audio focus loss); holding service and WakeLock, awaiting focus return.
+4. `Recovering` (wire: `"recovering"`): Transient interruption (e.g. phone call or transient audio focus loss); holding service and WakeLock, awaiting focus return. If audio frames stop advancing (`lastAudioFrameTimestampMs` staleness $> 45\text{s}$), the watchdog detects an Audio HAL deadlock and triggers process self-healing.
 5. `Stopping` (wire: `"stopping"`): Slicer flushing final AAC buffers, writing terminal `.meta` file, canceling watchdog alarm.
 6. `Stopped` (wire: `"stopped"`): Capture closed cleanly, notification removed, resources released. Transitions automatically to `Idle`.
-7. `FailedTerminal` (wire: `"failedTerminal"`): Unrecoverable error (e.g. storage full, microphone hardware failure, permission permanently revoked). Requires manual user action.
+7. `FailedTerminal` (wire: `"failedTerminal"`): Unrecoverable error (e.g. storage full, microphone hardware failure, permission permanently revoked, or unrecoverable Audio HAL deadlock). Requires manual user action or automated watchdog self-healing process recreation.
 
 ```
                       +-------------------+
@@ -699,16 +715,14 @@ regained     |    interruption   ▼ or schedule end                  |
 
 -- 1. Aggregate Recording Sessions Table
 CREATE TABLE IF NOT EXISTS recording_sessions (
-    id TEXT NOT NULL PRIMARY KEY,
+    live_session_id TEXT PRIMARY KEY NOT NULL,
     tenant_id TEXT NOT NULL,
     vault_id TEXT NOT NULL,
     user_id TEXT NOT NULL,
-    state TEXT NOT NULL,                  -- 'active', 'completed', 'interrupted', 'failed'
-    start_time INTEGER NOT NULL,          -- Unix epoch milliseconds
-    end_time INTEGER,                     -- Unix epoch milliseconds (nullable during active capture)
-    duration_ms INTEGER NOT NULL DEFAULT 0,
     local_day_key TEXT NOT NULL,          -- Format 'YYYY-MM-DD' for fast timeline grouping
-    source TEXT NOT NULL,                 -- 'manual', 'schedule', 'auto_resume'
+    started_at INTEGER NOT NULL,          -- Epoch milliseconds
+    ended_at INTEGER,                     -- Epoch milliseconds (null during active capture)
+    duration_ms INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 );
@@ -720,24 +734,21 @@ ON recording_sessions (tenant_id, vault_id, user_id, local_day_key);
 
 -- 2. Individual Audio Slices & Segments Table
 CREATE TABLE IF NOT EXISTS recording_segments (
-    id TEXT NOT NULL PRIMARY KEY,
-    live_session_id TEXT NOT NULL,        -- FK -> recording_sessions(id)
+    segment_id TEXT PRIMARY KEY NOT NULL,
+    live_session_id TEXT NOT NULL,
     segment_index INTEGER NOT NULL,
-    file_path TEXT NOT NULL,              -- Local absolute path to .aac audio file
-    meta_path TEXT NOT NULL,              -- Local absolute path to .meta JSON sidecar file
+    started_at INTEGER NOT NULL,          -- Epoch milliseconds
     duration_ms INTEGER NOT NULL,
-    file_size_bytes INTEGER NOT NULL,
-    sha256_hash TEXT NOT NULL,
-    split_reason TEXT NOT NULL,           -- 'silence_window', 'hard_limit', 'service_shutdown'
-    sync_state TEXT NOT NULL,             -- 'pending', 'uploading', 'uploaded', 'failed'
+    local_file_key TEXT NOT NULL,         -- Relative path, e.g. 'segments/seg_01JCG9Y/seg_01JCG9Y.aac'
+    storage_key TEXT,                     -- Cloud storage object key once uploaded
+    is_uploaded INTEGER NOT NULL DEFAULT 0, -- Boolean: 0 = false, 1 = true
     created_at INTEGER NOT NULL,
-    uploaded_at INTEGER,                  -- Unix epoch milliseconds (null until uploaded)
-    FOREIGN KEY(live_session_id) REFERENCES recording_sessions(id) ON DELETE CASCADE
+    FOREIGN KEY(live_session_id) REFERENCES recording_sessions(live_session_id) ON DELETE CASCADE
 );
 
 -- Index for ordering slices within a session:
 CREATE INDEX IF NOT EXISTS idx_segments_session 
-ON recording_segments (live_session_id, segment_index);
+ON recording_segments (live_session_id);
 
 
 -- 3. Native WorkManager Persistent Upload Queue Table
@@ -775,11 +786,13 @@ CREATE TABLE IF NOT EXISTS tenants (
 
 -- 5. Device Profile (DP) Connections Table
 CREATE TABLE IF NOT EXISTS dp_connections (
-    id TEXT NOT NULL PRIMARY KEY,
+    connection_type TEXT NOT NULL,
+    dp_unit_id TEXT NOT NULL,
     tenant_id TEXT NOT NULL,
     endpoint TEXT NOT NULL,
     status TEXT NOT NULL,                 -- 'connected', 'degraded', 'unreachable'
-    last_heartbeat INTEGER NOT NULL
+    last_heartbeat INTEGER NOT NULL,
+    PRIMARY KEY (connection_type, dp_unit_id)
 );
 
 
@@ -957,7 +970,7 @@ To prevent duplicate audio recording and conflicting transcripts when a user car
 | Canonical Error Code | HTTP Status | Root Cause & Server Logic | Client Recovery Action |
 |---|---|---|---|
 | `recording.upload_rejected_no_primary` | `403 Forbidden` | No device in the vault currently holds an active primary lease (`COUNT(is_primary) == 0`). | Client prompts user to designate primary device in Settings. |
-| `recording.upload_rejected_not_primary` | `403 Forbidden` | Uploading `dp_instance_id` does not match the active primary device in `dp_instances`. | Secondary device terminates upload, marks local segment as skipped/archived, and avoids redundant network transfers. |
+| `recording.upload_rejected_not_primary` | `409 Conflict` / `403 Forbidden` | Uploading `dp_instance_id` does not match the active primary device in `dp_instances` (enforced via unique index `idx_dp_instances_primary_unique`). | Secondary device terminates upload, marks local segment as skipped/archived, and WorkManager immediately issues an internal IPC command (`net.hemory.app.recording.ACTION_STOP` or `ACTION_PAUSE`) to halt `RecordingForegroundService`, preventing continuous audio capture and battery drain. |
 | `recording.upload_rejected_out_of_primary_window` | `403 Forbidden` | Upload timestamp falls outside the user's active listening schedule window defined in `listening_schedules`. | Worker purges or parks segment; does not retry. |
 | `recording.upload_rejected_invalid_time` | `409 Conflict` | Segment `started_at` timestamp has drifted ahead of server clock ($> 30\text{s}$) or is stale ($> 7\text{ days}$). | Client syncs clock via NTP / server HTTP `Date` header and reconciles timestamps. |
 
@@ -1119,7 +1132,7 @@ CREATE TABLE dp_instances (
 
 CREATE INDEX idx_dp_instances_user ON dp_instances(user_id);
 CREATE INDEX idx_dp_instances_vault ON dp_instances(vault_id);
-CREATE INDEX idx_dp_instances_primary ON dp_instances(vault_id, is_primary) WHERE is_primary = TRUE;
+CREATE UNIQUE INDEX idx_dp_instances_primary_unique ON dp_instances(tenant_id, vault_id, user_id) WHERE is_primary = TRUE;
 
 -- ----------------------------------------------------------------------------
 -- 5. DEVICE_BINDINGS: Hardware identity linking and push tokens
@@ -1875,6 +1888,52 @@ All endpoints discovered across the reverse-engineering evidence baseline are ca
   }
   ```
 
+#### 5.3.8 POST `/push-token`
+- **Method**: `POST`
+- **Path**: `/push-token`
+- **Headers**:
+  - `Authorization: Bearer <access_token>`
+  - `Content-Type: application/json`
+- **Request Body Schema**:
+  ```json
+  {
+    "device_unique_identifier": "android_hw_8f21a4bc",
+    "push_token": "fcm_e4k8_99a81bc42e7f80d1e3a56b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7",
+    "push_provider": "fcm",
+    "app_version": "0.3.11"
+  }
+  ```
+- **Response Body Schema (200 OK)**:
+  ```json
+  {
+    "status": "registered",
+    "registered_at": "2026-11-10T08:00:00Z"
+  }
+  ```
+
+#### 5.3.9 POST `/device-pairing/sessions/`
+- **Method**: `POST`
+- **Path**: `/device-pairing/sessions/`
+- **Headers**:
+  - `Authorization: Bearer <access_token>`
+  - `Content-Type: application/json`
+- **Request Body Schema**:
+  ```json
+  {
+    "pairing_mode": "qr_code",
+    "device_kind": "watch",
+    "client_nonce": "non_01JCG9Y91B3K4P0W8A"
+  }
+  ```
+- **Response Body Schema (201 Created)**:
+  ```json
+  {
+    "session_id": "pair_01JCG9Y91B3K4P0W8B",
+    "pairing_code": "849201",
+    "expires_at": "2026-11-10T08:15:00Z"
+  }
+  ```
+
 ---
 
 #### 3.4.4 Audio Segment Ingestion & Retention Domain
@@ -1903,17 +1962,17 @@ All endpoints discovered across the reverse-engineering evidence baseline are ca
     }
     ```
   - `file` (`audio/aac`): Binary raw AAC stream with standard ADTS packet headers.
-- **Response Body Schema (200 OK)**:
+- **Response Body Schema (201 Created)** *(Contract C2)*:
   ```json
   {
-    "upload_id": "upl_8921f00a",
-    "recording_id": "rec_00918a2b",
-    "segment_id": "seg_10283f",
-    "storage_key": "segments/seg_10283f/audio.aac",
-    "upload_status": "completed",
-    "bytes_received": 368640
+    "recording_id": "rec_01JCG9Y91B3K4P0W8A",
+    "asset_id": "ast_01JCG9Y92A9P3F2K8Z",
+    "artifact_id": "art_01JCG9Y93Z5N7X8L1Q",
+    "storage_key": "recordings/2026/11/10/seg_01JCG9Y91B.aac",
+    "status": "queued_for_processing"
   }
   ```
+  *(Note: Server returns HTTP 201 Created upon successful segment registration; HTTP 200 OK is supported for backwards compatibility).*
 - **Error Codes**:
   - `401 Unauthorized`: `{"error": "auth_missing", "message": "Valid Bearer or DP token required."}`
   - `403 Forbidden`: `{"error": "recording.upload_rejected_not_primary", "message": "This device does not hold the active primary recording lease."}`
@@ -2218,18 +2277,34 @@ All endpoints discovered across the reverse-engineering evidence baseline are ca
   - `Authorization: Bearer <access_token>`
   - `Content-Type: application/json`
 - **Request Body Schema (`ClusterPatchRequest`)**:
-  ```json
-  {
-    "action": "mark_existing", // Allowed: "dismiss", "mark_existing", "mark_new"
-    "target_speaker_id": "spk_01"
-  }
-  ```
+  The mutation schema is a discriminated union based on `action` (`"mark_new"`, `"mark_existing"`, `"dismiss"`):
+  - *Option A (`mark_new`)*:
+    ```json
+    {
+      "action": "mark_new",
+      "name": "Sarah Jenkins",
+      "notes": "VP of Engineering"
+    }
+    ```
+  - *Option B (`mark_existing`)*:
+    ```json
+    {
+      "action": "mark_existing",
+      "speaker_id": "spk_01JCG9Z1A8B3C4D5E"
+    }
+    ```
+  - *Option C (`dismiss`)*:
+    ```json
+    {
+      "action": "dismiss"
+    }
+    ```
 - **Response Body Schema (200 OK)**:
   ```json
   {
     "cluster_id": "cls_99182a",
-    "status": "identified",
-    "speaker_id": "spk_01"
+    "status": "enrolled",
+    "speaker_id": "spk_01JCG9Z1A8B3C4D5E"
   }
   ```
 
@@ -2464,64 +2539,7 @@ Directly extracted from `Lxf/f;.b` (`dex2_full.txt:1185582-1185645`):
 The client layer relies on SQLite via Dart Drift ORM (`features/recording`) to track live sessions, segments, and pending network uploads.
 
 #### 2.3.1 Database Relational DDL Specification
-
-```sql
--- 1. Recording Sessions: Master listening session entity
-CREATE TABLE IF NOT EXISTS recording_sessions (
-    live_session_id TEXT PRIMARY KEY NOT NULL,
-    tenant_id TEXT NOT NULL,
-    vault_id TEXT NOT NULL,
-    user_id TEXT NOT NULL,
-    local_day_key TEXT NOT NULL,       -- Format: 'YYYY-MM-DD'
-    started_at INTEGER NOT NULL,       -- Epoch milliseconds
-    ended_at INTEGER,                  -- Epoch milliseconds (null if currently active)
-    duration_ms INTEGER NOT NULL DEFAULT 0,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_sessions_owner_day 
-ON recording_sessions (tenant_id, vault_id, user_id, local_day_key);
-
--- 2. Recording Segments: Discrete audio chunks belonging to a session
-CREATE TABLE IF NOT EXISTS recording_segments (
-    segment_id TEXT PRIMARY KEY NOT NULL,
-    live_session_id TEXT NOT NULL,
-    segment_index INTEGER NOT NULL,
-    started_at INTEGER NOT NULL,       -- Epoch milliseconds
-    duration_ms INTEGER NOT NULL,
-    local_file_key TEXT NOT NULL,      -- Relative path, e.g. 'segments/seg_01JCG9Y/seg_01JCG9Y.aac'
-    storage_key TEXT,                  -- Cloud storage object key once uploaded
-    is_uploaded INTEGER NOT NULL DEFAULT 0, -- Boolean: 0 = false, 1 = true
-    created_at INTEGER NOT NULL,
-    FOREIGN KEY(live_session_id) REFERENCES recording_sessions(live_session_id) ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS idx_segments_session 
-ON recording_segments (live_session_id);
-
--- 3. Upload Queue: Persistent queue driving native WorkManager tasks
-CREATE TABLE IF NOT EXISTS upload_queue (
-    upload_id TEXT PRIMARY KEY NOT NULL,    -- Equal to WorkManager inputData['uploadId']
-    tenant_id TEXT NOT NULL,
-    vault_id TEXT NOT NULL,
-    segment_id TEXT NOT NULL,
-    local_file_key TEXT NOT NULL,           -- Absolute path to local audio file
-    priority INTEGER NOT NULL DEFAULT 0,    -- 0: Normal, 1: High, 2: Realtime
-    upload_status TEXT NOT NULL,            -- 'Pending', 'Uploading', 'Completed', 'Failed'
-    attempts INTEGER NOT NULL DEFAULT 0,    -- Incremented on every execution attempt
-    max_attempts INTEGER NOT NULL DEFAULT 5,
-    next_retry_at INTEGER,                  -- Epoch milliseconds for next backoff execution
-    started_at INTEGER NOT NULL,            -- Initial queue insertion timestamp
-    upload_block_reason TEXT,               -- Structured failure or block reason string
-    payload TEXT,                           -- JSON serialized UploadEntry metadata
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_upload_queue_status_retry 
-ON upload_queue (upload_status, next_retry_at);
-```
+The authoritative bytecode-verified DDL schemas and cascade indexes for `recording_sessions`, `recording_segments`, and `upload_queue` are defined in [§2.3.1 客户端本地持久化规范 (SQLite & Drift ORM)](#231-完整-drift-ddl-表结构与索引-recording_sessions-recording_segments-upload_queue-tenants-dp_connections-page_snapshot_cache). See Section 2.3.1 for the complete unified SQLite schema, field semantics, foreign keys (`ON DELETE CASCADE`), and composite primary keys (`PRIMARY KEY (connection_type, dp_unit_id)`).
 
 #### 2.3.2 Queue State Machine & Transitions
 
@@ -2694,22 +2712,20 @@ Content-Type: audio/aac
 ------HemoryUploadBoundary7MA4YWxkTrZu0gW--
 ```
 
-#### 2.5.3 Success Response (HTTP 200 / 201)
-Extracted from `dex1_full.txt:791761-791780` (`recording_id`, `asset_id`, `artifact_id`):
+#### 2.5.3 Success Response (HTTP 201 Created / 200 OK)
+Conforming to canonical Contract C2 and extracted from `dex1_full.txt:791761-791780` (`recording_id`, `asset_id`, `artifact_id`):
 
 ```json
 {
   "recording_id": "rec_01JCG9Y91B3K4P0W8A",
   "asset_id": "ast_01JCG9Y92A9P3F2K8Z",
   "artifact_id": "art_01JCG9Y93Z5N7X8L1Q",
-  "storage_key": "tenants/t_01JC8A/vaults/v_01JC8B/recordings/2026/11/10/seg_01JCG9Y91B.aac",
-  "status": "uploaded",
-  "duration_ms": 58340,
-  "uploaded_at": "2026-11-10T08:31:02Z"
+  "storage_key": "recordings/2026/11/10/seg_01JCG9Y91B.aac",
+  "status": "queued_for_processing"
 }
 ```
 
-*Fault-Tolerant Client Parsing*: In `UploadAttempt.parseSuccessIds`, if parsing any specific ID fails, the worker logs `parseSuccessIds JSONException（不影响成功判定）` and continues marking the segment successful as long as the HTTP status is 2xx (`200` or `201`).
+*Fault-Tolerant Client Parsing*: In `UploadAttempt.parseSuccessIds`, if parsing any specific ID fails, the worker logs `parseSuccessIds JSONException（不影响成功判定）` and continues marking the segment successful as long as the HTTP status is 2xx (`201` or `200`).
 
 #### 2.5.4 Error Taxonomy & HTTP Status Code Handling
 Extracted from `dex1_full.txt:791575-791620`:
@@ -2728,10 +2744,10 @@ Extracted from `dex1_full.txt:791575-791620`:
 | `IOException` | Physical network disconnection | Recoverable | `Result.retry()`. Logs `"HTTP POST 传输层异常"`. |
 
 #### 2.5.5 Primary Device Lease Rejection Codes
-When multi-device recording conflicts occur, the server upload endpoint returns HTTP 409 or 422 with structured rejection reason codes (`hemory_reverse_engineering_summary.md:71`):
+When multi-device recording conflicts occur, the server upload endpoint returns HTTP `409 Conflict` (or `403 Forbidden`) with structured rejection reason codes (`hemory_reverse_engineering_summary.md:71`):
 
 - `recording.upload_rejected_no_primary`: No primary device has been leased for this vault.
-- `recording.upload_rejected_not_primary`: Another device currently holds the primary recording lease.
+- `recording.upload_rejected_not_primary`: Another device currently holds the primary recording lease. When this `409 Conflict` code is received, `UploadWorker` flags the device as an inactive secondary recorder, marks the SQLite queue entry as archived, and issues an internal IPC broadcast (`net.hemory.app.recording.ACTION_STOP` or `ACTION_PAUSE`) to immediately halt `RecordingForegroundService`. This shuts down hardware audio capture, stops ADTS AAC encoding, and prevents severe battery drain on non-primary devices.
 - `recording.upload_rejected_out_of_primary_window`: Audio segment was captured outside the leased active window.
 - `recording.upload_rejected_invalid_time`: Segment timestamp deviates significantly from server NTP baseline.
 
@@ -2781,12 +2797,31 @@ x-request-id: 01JCG9Y91B3K4P0W8A00000002
 }
 ```
 
+#### 3.1.4 Cancellation Protocol (`POST /chat/threads/{thread_id}/turns/{turn_id}/cancel`)
+When the user cancels an ongoing streaming turn, the client issues an explicit HTTP POST:
+```http
+POST /chat/threads/th_01JCG9Y91B3K4P0W8A/turns/turn_01JCG9Y91B3K4P0W8B/cancel HTTP/1.1
+Host: api.hemory.net
+Authorization: Bearer <user_access_token>
+```
+Response: HTTP `200 OK`:
+```json
+{
+  "thread_id": "th_01JCG9Y91B3K4P0W8A",
+  "turn_id": "turn_01JCG9Y91B3K4P0W8B",
+  "status": "cancelled",
+  "cancelled_at": "2026-11-10T08:45:02Z"
+}
+```
+Upon receiving cancellation, the server terminates active LLM generation, halts tool execution, emits a final `turn_failed` event with `turn_error_kind: "cancelled"`, and closes the SSE connection.
+
 ---
 
 #### 4.2.2 SSE 事件全生命周期与 Wire 协议载荷 (turn_progress 阶段迁移 recalling -> executing -> summarizing, tool_call_*, token, turn_completed, turn_failed)
 
-Every event streamed across the wire conforms to the standard W3C Server-Sent Events syntax:
+Every event streamed across the wire conforms to the standard W3C Server-Sent Events syntax, including monotonic event identifiers for transparent network drop resumption:
 ```
+id: <event_id>\n
 event: <event_type>\n
 data: <json_string_payload>\n\n
 ```
@@ -2808,6 +2843,7 @@ data: <json_string_payload>\n\n
 
 **1. `turn_progress` (Phase: `recalling`)**
 ```http
+id: turn_01JCG9Y91B3K4P0W8B_001
 event: turn_progress
 data: {"thread_id":"th_01JCG9Y91B3K4P0W8A","turn_id":"turn_01JCG9Y91B3K4P0W8B","phase":"recalling","message":"Searching your memory timeline"}
 
@@ -2815,6 +2851,7 @@ data: {"thread_id":"th_01JCG9Y91B3K4P0W8A","turn_id":"turn_01JCG9Y91B3K4P0W8B","
 
 **2. `tool_call_started` (`search_memory`)**
 ```http
+id: turn_01JCG9Y91B3K4P0W8B_002
 event: tool_call_started
 data: {"thread_id":"th_01JCG9Y91B3K4P0W8A","turn_id":"turn_01JCG9Y91B3K4P0W8B","message_id":"msg_01JCG9Y91B3K4P0W8C","tool_call_id":"tc_01JCG9Y91B3K4P0W8D","tool_name":"search_memory","arguments":{"query":"parked car morning","date_from":"2026-11-10T00:00:00Z","date_to":"2026-11-10T12:00:00Z","limit":5},"status":"running"}
 
@@ -2822,6 +2859,7 @@ data: {"thread_id":"th_01JCG9Y91B3K4P0W8A","turn_id":"turn_01JCG9Y91B3K4P0W8B","
 
 **3. `tool_call_completed` (`search_memory`)**
 ```http
+id: turn_01JCG9Y91B3K4P0W8B_003
 event: tool_call_completed
 data: {"thread_id":"th_01JCG9Y91B3K4P0W8A","turn_id":"turn_01JCG9Y91B3K4P0W8B","message_id":"msg_01JCG9Y91B3K4P0W8C","tool_call_id":"tc_01JCG9Y91B3K4P0W8D","tool_name":"search_memory","status":"completed","result":{"matches_count":1,"memories":[{"memory_id":"mem_01JCG9Z1A","title":"Parked in B2 Zone 14","occurred_at":"2026-11-10T08:45:00Z","snippet":"Left the car at underground level B2, space 14 near the elevator.","confidence":0.94}]},"elapsed_ms":482}
 
@@ -2829,12 +2867,15 @@ data: {"thread_id":"th_01JCG9Y91B3K4P0W8A","turn_id":"turn_01JCG9Y91B3K4P0W8B","
 
 **4. `text_delta` (Streaming Tokens)**
 ```http
+id: turn_01JCG9Y91B3K4P0W8B_004
 event: text_delta
 data: {"turn_id":"turn_01JCG9Y91B3K4P0W8B","delta":"You parked your car "}
 
+id: turn_01JCG9Y91B3K4P0W8B_005
 event: text_delta
 data: {"turn_id":"turn_01JCG9Y91B3K4P0W8B","delta":"in underground level **B2, space 14** "}
 
+id: turn_01JCG9Y91B3K4P0W8B_006
 event: text_delta
 data: {"turn_id":"turn_01JCG9Y91B3K4P0W8B","delta":"near the elevator this morning at 8:45 AM."}
 
@@ -2842,6 +2883,7 @@ data: {"turn_id":"turn_01JCG9Y91B3K4P0W8B","delta":"near the elevator this morni
 
 **5. `turn_completed`**
 ```http
+id: turn_01JCG9Y91B3K4P0W8B_007
 event: turn_completed
 data: {"thread_id":"th_01JCG9Y91B3K4P0W8A","turn_id":"turn_01JCG9Y91B3K4P0W8B","message_id":"msg_01JCG9Y91B3K4P0W8C","status":"completed","completed_at":"2026-11-10T08:45:03Z"}
 
@@ -2849,10 +2891,23 @@ data: {"thread_id":"th_01JCG9Y91B3K4P0W8A","turn_id":"turn_01JCG9Y91B3K4P0W8B","
 
 **6. `turn_failed` (Edge Error)**
 ```http
+id: turn_01JCG9Y91B3K4P0W8B_008
 event: turn_failed
 data: {"thread_id":"th_01JCG9Y91B3K4P0W8A","turn_id":"turn_01JCG9Y91B3K4P0W8B","error_code":"TURN_TIMEOUT","message":"LLM reasoning exceeded 30000ms deadline","turn_failed_at":"2026-11-10T08:45:33Z","turn_error_kind":"timeout"}
 
 ```
+
+#### 3.2.3 SSE Stream Resumption & Reconnection Protocol (`Last-Event-ID`)
+Mobile clients frequently encounter cellular/Wi-Fi handover or transient TCP disconnects. To prevent token loss and avoid re-executing costly LLM reasoning:
+1. **Event Identifier Semantics**: Every streamed message includes an `id: {turn_id}_{seq}` tag where `seq` is a 3-digit zero-padded monotonic integer (`001`, `002`, `003` up to `999`).
+2. **Reconnection Header**: Upon transport failure, the client reconnects by sending:
+   ```http
+   Last-Event-ID: turn_01JCG9Y91B3K4P0W8B_004
+   ```
+3. **Server Circular Replay Buffer**:
+   - The server maintains an in-memory/Redis ring buffer per active turn retaining emitted events for 60 seconds.
+   - If `Last-Event-ID` is provided, the server replays all cached events with `seq > last_seq`, restoring streaming token flow without LLM restart.
+   - If the replay buffer has expired, the server returns HTTP `410 Gone` with `{"error": "turn_replay_buffer_expired"}` to signal client state reset.
 
 ---
 
@@ -3010,7 +3065,7 @@ Hemory defines two native, high-performance retrieval tools exposed internally t
 3. **`executing`**: Agent triggers tools (`search_memory`, `search_sections`). Emits `tool_call_started`, streaming cards into `ChatToolCallCard`. Completes with `tool_call_completed`.
 4. **`summarizing`**: Agent begins token generation. Streams `text_delta` chunks into `ChatStreamingMarkdownText`.
 5. **`completed`**: Emits `turn_completed`. Markdown view finalizes and settles into static `ChatAgentMarkdownText`.
-6. **`cancelled` / `failed`**: If user hits Cancel (`POST /turns/{id}/cancel`) or an error occurs, stream terminates with `turn_failed`.
+6. **`cancelled` / `failed`**: If user hits Cancel (`POST /chat/threads/{thread_id}/turns/{turn_id}/cancel`) or an error occurs, stream terminates with `turn_failed` (with `turn_error_kind: "cancelled"`).
 
 ---
 
@@ -3112,10 +3167,10 @@ The diarization engine operates as a hybrid pipeline combining low-latency onlin
 #### 4.3.3 Cluster Mutation Payload Specification (`ClusterPatchRequest`)
 Extracted from `libapp_strings.txt:29092` and associated models:
 
-**1. Action: `markAsNewSpeaker`**
+**1. Action: `mark_new` (`markAsNewSpeaker`)**
 ```json
 {
-  "action": "new_speaker",
+  "action": "mark_new",
   "name": "Sarah Jenkins",
   "notes": "VP of Engineering"
 }
@@ -3127,10 +3182,10 @@ Extracted from `libapp_strings.txt:29092` and associated models:
 3. Executes retroactive update across historical `section_messages` matching the cluster segments, updating `speaker_id` to the new profile ID.
 4. Marks the cluster as resolved (`status: "enrolled"`).
 
-**2. Action: `markAsExistingSpeaker`**
+**2. Action: `mark_existing` (`markAsExistingSpeaker`)**
 ```json
 {
-  "action": "assign_speaker",
+  "action": "mark_existing",
   "speaker_id": "spk_01JCG9Z1A8B3C4D5E"
 }
 ```
@@ -3141,7 +3196,7 @@ Extracted from `libapp_strings.txt:29092` and associated models:
 3. Retroactively updates historical `section_messages` from this cluster with `speaker_id`.
 4. Marks cluster as merged (`status: "merged"`).
 
-**3. Action: `dismissCluster`**
+**3. Action: `dismiss` (`dismissCluster`)**
 ```json
 {
   "action": "dismiss"
@@ -3288,6 +3343,30 @@ A common race condition occurs when a user modifies or deletes a scheduled windo
 2. It launches an asynchronous network check (`defaultFetch`) against `/users/me/listening-schedule`.
 3. If the network response returns after the intended fire time or confirms the window was deleted, the receiver emits `listening_schedule_fetch_late_discarded` (with HTTP status payload) and **cancels** the pending `ACTION_FIRE` alarm (`key_methods_disasm.txt:1100-1125`).
 
+#### 4.4.5 Schedule Interval Unification & UTC Normalization Algorithm
+To eliminate alarm collisions, cross-timezone drift, and premature service termination caused by overlapping windows after a 3-way merge:
+
+1. **Timezone Conversion to UTC Normalization**:
+   Before performing three-way merge resolution or persisting to PostgreSQL `listening_schedules`, all window definitions are normalized from the client's local timezone into UTC:
+   - Client sends local `start_minutes`, `end_minutes`, and `timezone` (e.g. `America/Los_Angeles`).
+   - The coordinator calculates UTC minute offsets normalized to a 0–1440 range per day, resolving cross-timezone edits from multi-device users without skew.
+
+2. **Interval Unification (Merge Overlapping Windows)**:
+   For every weekday ($d \in [1..7]$), the set of merged time windows is sorted by `start_minutes`. If any two windows overlap or are contiguous ($start_{i+1} \le end_i$):
+   $$\text{Unified Window} = \left[ \min(start_i, start_{i+1}), \max(end_i, end_{i+1}) \right]$$
+   The unification loop iterates until all windows on that weekday are strictly disjoint:
+   $$end_i < start_{i+1} \quad \forall i$$
+
+3. **Discrete Alarm Scheduling Invariant**:
+   When the Flutter layer invokes `ListeningScheduleNativeSync.apply`, the native scheduler `j8/w` validates that windows are non-overlapping. This guarantees that:
+   - Exactly one `ACTION_FIRE` initiates the foreground service at the unified window start.
+   - Exactly one `ACTION_STOP` halts the service at the unified window end.
+   - No conflicting intermediate `ACTION_STOP` alarm can extinguish active recording during a combined listening session.
+
+4. **Database vs Endpoint Scope Resolution**:
+   - The REST endpoint `/users/me/listening-schedule` manages the user's authoritative global schedule.
+   - In PostgreSQL `listening_schedules`, `dp_instance_id` represents the specific DP execution node; when a user updates `/users/me/listening-schedule`, the server applies the unified schedule across all DP instances bound to that user's vault, maintaining version consistency through `x-hemory-listening-schedule-revision`.
+
 ---
 
 ## 5. 端到端核心时序与状态流图示 (End-to-End Sequence & State Diagrams)
@@ -3364,12 +3443,14 @@ flowchart TD
     Stall --> LeaseExpire[60s Lease Time Expires]
     
     LeaseExpire --> WakeOS[OS Wakes DeadManSwitchAlarmReceiver]
-    WakeOS --> CheckService{Is Service Flag Active?<br>RecordingForegroundService.f36186Y}
+    WakeOS --> CheckService{Is Service Running?<br>RecordingForegroundService.f36186Y}
     
-    CheckService -->|True| FalseAlarm[Log: Heartbeat freeze false alarm<br>Discard event]
-    FalseAlarm --> EndDiscard([Exit])
+    CheckService -->|True| CheckAudioHAL{Audio Frames Advancing?<br>now - lastAudioFrameTimestampMs <= 45s}
+    CheckAudioHAL -->|True: Healthy Audio, Coroutine Delayed| FalseAlarm[Log: Heartbeat Delayed by OS<br>Re-arm AlarmManager for +60s]
+    FalseAlarm --> WaitTick
+    CheckAudioHAL -->|False: HAL Frozen / Deadlock| PostAlert
     
-    CheckService -->|False| PostAlert[Post Heads-Up Alert Notification<br>Channel: hemory_recording_alerts<br>ID: 1214606592, Importance: HIGH]
+    CheckService -->|False: Process LMK Killed| PostAlert[Post Heads-Up Alert Notification<br>Channel: hemory_recording_alerts<br>ID: 1214606592, Importance: HIGH]
     PostAlert --> UserTap[User Taps Notification / System Intent]
     
     UserTap --> LaunchMain[Launch MainActivity<br>Extra: source = deadSwitchNotification]
@@ -3399,8 +3480,8 @@ sequenceDiagram
     Watch->>Ingest: POST /tenants/ten_01/vaults/vlt_88/recordings/upload (file: watch_chunk.aac)
     Ingest->>DB: SELECT is_primary FROM dp_instances WHERE dp_instance_id = 'dp_watch_02'
     DB-->>Ingest: is_primary = FALSE
-    Ingest-->>Watch: 403 Forbidden {"error": "recording.upload_rejected_not_primary"}
-    Note over Watch: Watch cancels local retry, marks segment archived/skipped
+    Ingest-->>Watch: 409 Conflict {"error": "recording.upload_rejected_not_primary"}
+    Note over Watch: WorkManager issues ACTION_STOP IPC -> stops RecordingForegroundService to conserve battery; marks segment archived
 
     Note over Phone,Ingest: Scenario B: Authoritative Primary Device Upload
     Phone->>Phone: WorkManager Pre-Send Check: entry.tenantId == activeSession.tenantId
@@ -3413,7 +3494,7 @@ sequenceDiagram
     ObjectStore-->>Ingest: 200 OK (etag: "98a100bf2")
     Ingest->>DB: INSERT INTO recording_segments (segment_id, upload_status="uploaded")
     DB-->>Ingest: Inserted
-    Ingest-->>Phone: 200 OK {"upload_id": "upl_8921f00a", "upload_status": "completed"}
+    Ingest-->>Phone: 201 Created {"recording_id": "rec_01JCG9Y91B3K4P0W8A", "status": "queued_for_processing"}
     Phone->>Ingest: POST /recording-retention {upload_id: "upl_8921f00a", retention_state: "confirmed"}
     Ingest-->>Phone: 200 OK {"status": "acknowledged"}
 ```
@@ -3975,7 +4056,7 @@ class AppDatabase extends _$AppDatabase {
 | **§2.1.5** | 电池与低功耗白名单 | `classes.dex`, `classes2.dex` | `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`, `isIgnoringBatteryOptimizations` | Doze 深度休眠穿透；厂商白名单引导逻辑 |
 | **§2.2.1** | MethodChannel IPC 协议 | `libapp.so`, `classes.dex` | `hemory/native_bridge`, `hemory/listen_checkup`, `hemory/channel_info`, `hemory/billing`, `Ne.o` 7-Tuple | 包含鉴权 7 元组透传与日程应用契约 |
 | **§2.2.2** | EventChannel 连续流 | `libapp.so` | `hemory/recording/state`, `hemory/recording/events`, `hemory/recording/metering`, `hemory/recording/segments` | 状态迁移、实时分贝波形流及切片落盘事件 |
-| **§2.2.3** | 7 态录音业务状态机 | `classes2.dex` | `Lxf/w;`, `hf.i` 枚举状态 (`uninitialized`, `idle`, `starting`, `recording`, `paused`, `stopping`, `error`) | 严谨的状态转移矩阵与异常自愈路径 |
+| **§2.2.3** | 7 态录音业务状态机 | `classes2.dex` | `hf.i` 7 态枚举 (`Idle`, `Activating`, `Recording`, `Recovering`, `Stopping`, `Stopped`, `FailedTerminal`) | 严谨的状态转移矩阵与异常自愈路径 |
 | **§2.3.1** | Drift 本地 SQLite DDL | `libapp.so`, `classes.dex` | 6 张数据表：`recording_sessions`, `recording_segments`, `upload_queue`, `tenants`, `dp_connections`, `page_snapshot_cache` | 完整的 DDL 表结构与 `idx_sessions_owner_day` 等级联索引 |
 | **§2.3.2** | 原生队列与 7 天保留 | `classes2.dex` | `xf.G`, `files/upload/upload_queue.json`, `UploadWorker` (`NetworkType.CONNECTED`, exponential backoff) | 7 天淘汰窗口算法：`now - 7 * 24 * 3600 * 1000` |
 | **§3.1** | 四级租户与硬件绑定 | `libapp.so`, `openapi.json` | `tenant_id`, `vault_id`, `user_id`, `dp_instance_id`, `device_bindings`, `device_unique_identifier` | 严格的多级层次关系与外键微隔离边界 |
@@ -3986,7 +4067,7 @@ class AppDatabase extends _$AppDatabase {
 | **§3.4** | 服务端 REST API 全集 | `openapi.json`, `libapp.so` | 8 大领域、31 个权威 API 端点规范字典 | 包含完整的 Query/Body JSON Schema 与响应模型 |
 | **§4.1.2** | 静音切片决策引擎 | `classes2.dex` | `silence_ms_before_cut >= 1250ms`, 最大时长 300s, 最小时长 10s, `.meta` JSON 伴生文件 | 智能 VAD 静音切片与异常兜底 |
 | **§4.1.5** | 多段音频上传表单 | `classes2.dex`, `libapp.so` | `POST /tenants/{tenant_id}/vaults/{vault_id}/recordings/upload`, 6 段表单字段 | 成功返回 201 实体模型，包含 `recording_id`, `storage_key` |
-| **§4.2** | SSE 对话与工具调用 | `libapp.so` | `POST /chat/threads/{id}/turns`, `turn_progress` (`recalling` -> `executing` -> `summarizing`), `search_memory`, `search_sections` | 全生命周期 Wire Events、卡片渲染与客户端中断 |
+| **§4.2** | SSE 对话与工具调用 | `libapp.so` | `POST /chat/threads/{thread_id}/turns`, `turn_progress` (`recalling` -> `executing` -> `summarizing`), `search_memory`, `search_sections` | 全生命周期 Wire Events、卡片渲染与客户端中断 |
 | **§4.3** | 声纹入库与聚类 | `libapp.so` | 16kHz AAC, SNR >= 12dB, 有效语音 >= 3.0s, 512 维向量, 在线 $\tau=0.78$, 离线 $\tau=0.72$ | `ClusterPatchRequest` 三大动作 (`markAsNewSpeaker` 等) |
 | **§4.4** | 录音日程同步协议 | `libapp.so`, `classes2.dex` | `x-hemory-listening-schedule-revision`, `weekly_windows[]`, `listening_schedule_fetch_late_discarded`, `auto_schedule_save_self_healed` | 乐观并发版本控制与三方合并自愈 |
 

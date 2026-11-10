@@ -79,10 +79,13 @@ def join_text(parts: list[str]) -> str:
 
 class Pipeline:
     def __init__(self, db: Database, settings: Settings, scorer=None, transcriber: Transcriber | None = None):
+        from .hemory_pipeline import HemorySegmentProcessor
+
         self.db, self.settings = db, settings
         self._scorer = scorer
         self._explicit_transcriber = transcriber is not None
         self.transcriber = transcriber or self.build_transcriber()
+        self.hemory_processor = HemorySegmentProcessor(self)
 
     def build_transcriber(self) -> Transcriber:
         return {
@@ -115,7 +118,7 @@ class Pipeline:
         plan_batches(self.db, self.settings)
         batch = claim_batch(self.db)
         if batch is None:
-            return False
+            return self.hemory_processor.tick()
         try:
             self.process(batch)
         except ProviderBlocked as exc:

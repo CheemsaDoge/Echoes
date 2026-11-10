@@ -200,7 +200,12 @@ class UploadService:
                 detail=f"capture_metadata must be valid JSON: {exc}",
             ) from exc
 
-        raw_idx = metadata.get("segment_index", 0)
+        if "segment_index" in metadata:
+            raw_idx = metadata["segment_index"]
+        elif "segmentIndex" in metadata:
+            raw_idx = metadata["segmentIndex"]
+        else:
+            raw_idx = 0
         if isinstance(raw_idx, (bool, float)):
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -241,7 +246,11 @@ class UploadService:
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="Header x-dp-instance-id does not match authenticated binding",
                 )
-            meta_dp = metadata.get("dp_instance_id") or metadata.get("device_id")
+            meta_dp = (
+                metadata.get("dp_instance_id")
+                or metadata.get("dpInstanceId")
+                or metadata.get("device_id")
+            )
             if meta_dp and meta_dp != bound_dp:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
@@ -252,6 +261,7 @@ class UploadService:
             uploading_dp_id = (
                 uploading_dp_id_header
                 or metadata.get("dp_instance_id")
+                or metadata.get("dpInstanceId")
                 or metadata.get("device_id")
                 or (auth_context.get("dp_instance_id") if auth_context else None)
             )
@@ -301,6 +311,7 @@ class UploadService:
         # 7. Check for idempotent retry before storage/db write
         session_id = (
             metadata.get("live_session_id")
+            or metadata.get("liveSessionId")
             or metadata.get("session_id")
             or f"sess_{seg_dt.strftime('%Y%m%d_%H%M%S')}"
         )
@@ -411,7 +422,7 @@ class UploadService:
                 bitrate_kbps=adts_meta.bitrate_kbps,
                 duration_ms=adts_meta.duration_ms,
                 file_size_bytes=adts_meta.file_size_bytes,
-                split_reason=metadata.get("split_reason", "window"),
+                split_reason=metadata.get("split_reason") or metadata.get("splitReason") or "window",
                 upload_status="uploaded",
             )
         except sqlite3.IntegrityError as err:

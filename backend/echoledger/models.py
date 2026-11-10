@@ -678,4 +678,19 @@ class ClientRecordingMutationsResponse(StrictModel):
     processed_count: int
 
 
+class MemoryEventPatchRequest(StrictModel):
+    title: str | None = Field(default=None, min_length=1, max_length=255)
+    summary: str | None = Field(default=None, max_length=4000)
+    category: str | None = Field(default=None, max_length=64)
+
+
+class DpInstanceEnsureRequest(StrictModel):
+    dp_instance_id: str = Field(min_length=1, max_length=64)
+    dp_instance_name: str = Field(default="Hemory Phone", min_length=1, max_length=255)
+    device_kind: Literal["phone", "watch", "official_cloud", "agent"] = "phone"
+    vault_id: str | None = None
+    make_primary: bool = True
+
+
+
 

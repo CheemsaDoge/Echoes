@@ -21,8 +21,16 @@ from .models import (SessionCreate, SessionClose, ChunkMeta, ProfileCreate, Eval
                      ChatTurnCreateRequest, ChatTurnCancelResponse, ChatThreadCreateRequest,
                      ChatThreadDto, ChatTurnDto, ProcessingChainDto, ProcessingChainsResponse,
                      RecordingMutationDto, RecordingMutationsResponse,
-                     ClientRecordingMutationsRequest, ClientRecordingMutationsResponse)
+                     ClientRecordingMutationsRequest, ClientRecordingMutationsResponse,
+                     MemoryEventPatchRequest, DpInstanceEnsureRequest,
+                     DpInstanceDto, DpInstanceListResponse)
 from .pipeline import Pipeline, plan_batches
+from .hemory_pipeline import (
+    VALID_CATEGORIES,
+    build_timeline_day_response,
+    get_memory_event_detail,
+    refresh_vault_events_for_cluster,
+)
 from .worker import run_loop
 from .queries import list_events, get_event, search_memories
 from .speakers import normalize, match_speaker
@@ -242,6 +250,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "UPDATE section_messages SET speaker_id=?, speaker_name=? WHERE cluster_id=?",
                     (new_spk_id, name, payload.cluster_id),
                 )
+            refresh_vault_events_for_cluster(
+                db=db,
+                vault_id=vault_id,
+                tenant_id=tenant_id,
+                cluster_id=payload.cluster_id,
+                speaker_id=new_spk_id,
+                speaker_name=name,
+            )
 
         return {
             "speaker_id": created["speaker_id"],
@@ -331,6 +347,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 notes=payload.notes,
                 role_label=payload.role_label,
             )
+            refresh_vault_events_for_cluster(
+                db=db,
+                vault_id=vault_id,
+                tenant_id=tenant_id,
+                cluster_id=cluster_id,
+                speaker_id=res.get("speaker_id"),
+                speaker_name=name,
+            )
             return res
 
         elif payload.action == "mark_existing":
@@ -345,6 +369,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     vault_id=vault_id,
                     target_speaker_id=payload.speaker_id,
                 )
+                spk_row = db.get_speaker_profile(payload.speaker_id, vault_id)
+                refresh_vault_events_for_cluster(
+                    db=db,
+                    vault_id=vault_id,
+                    tenant_id=tenant_id,
+                    cluster_id=cluster_id,
+                    speaker_id=payload.speaker_id,
+                    speaker_name=spk_row["name"] if spk_row else None,
+                )
                 return res
             except KeyError:
                 raise HTTPException(
@@ -356,6 +389,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             res = db.patch_voiceprint_cluster_dismiss(
                 cluster_id=cluster_id,
                 vault_id=vault_id,
+            )
+            refresh_vault_events_for_cluster(
+                db=db,
+                vault_id=vault_id,
+                tenant_id=tenant_id,
+                cluster_id=cluster_id,
             )
             return res
 
@@ -377,6 +416,86 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 vault_id=payload.vault_id,
                 tenant_id=tenant_id,
                 user_id=user_id,
+            )
+
+    @app.get("/dp-instances", response_model=DpInstanceListResponse, tags=["Lease"])
+    def list_dp_instances_endpoint(auth: dict = Depends(authenticate_tenancy)):
+        vault_id = auth.get("vault_id") or "vlt_default"
+        rows = db.list_dp_instances(vault_id)
+        instances = [
+            DpInstanceDto(
+                dp_instance_id=r["dp_instance_id"],
+                dp_instance_name=r["dp_instance_name"],
+                dp_unit_url=r.get("dp_unit_url") or "",
+                dp_base_url=r.get("dp_base_url") or "",
+                device_kind=r["device_kind"],
+                is_primary=bool(r.get("is_primary")),
+                is_official=bool(r.get("is_official")),
+                last_active_at=r.get("last_active_at"),
+                created_at=r.get("created_at"),
+            )
+            for r in rows
+        ]
+        return {"instances": instances}
+
+    @app.post("/dp-instances/ensure", response_model=PrimaryDeviceResponse, tags=["Lease"])
+    def ensure_dp_instance_endpoint(
+        payload: DpInstanceEnsureRequest,
+        auth: dict = Depends(authenticate_tenancy),
+    ):
+        tenant_id = auth.get("tenant_id") or "ten_default"
+        vault_id = payload.vault_id or auth.get("vault_id") or "vlt_default"
+        user_id = auth.get("user_id") or "usr_default"
+        if not auth.get("is_admin") and auth.get("vault_id") and auth["vault_id"] != vault_id:
+            raise HTTPException(status_code=403, detail="Cross-vault access forbidden")
+
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+        with db.connect(immediate=True) as conn:
+            existing = conn.execute(
+                "SELECT * FROM dp_instances WHERE dp_instance_id = ?",
+                (payload.dp_instance_id,),
+            ).fetchone()
+            if existing:
+                if existing["vault_id"] != vault_id or existing["tenant_id"] != tenant_id:
+                    raise HTTPException(status_code=403, detail="DP instance belongs to another vault")
+                conn.execute(
+                    "UPDATE dp_instances SET dp_instance_name = ?, last_active_at = ?, updated_at = ? WHERE dp_instance_id = ?",
+                    (payload.dp_instance_name, now_iso, now_iso, payload.dp_instance_id),
+                )
+            else:
+                conn.execute(
+                    """INSERT INTO dp_instances (
+                           dp_instance_id, tenant_id, vault_id, user_id, dp_instance_name,
+                           device_kind, is_primary, last_active_at, created_at, updated_at
+                       ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)""",
+                    (
+                        payload.dp_instance_id,
+                        tenant_id,
+                        vault_id,
+                        user_id,
+                        payload.dp_instance_name,
+                        payload.device_kind,
+                        now_iso,
+                        now_iso,
+                        now_iso,
+                    ),
+                )
+            if payload.make_primary:
+                return PrimaryLeaseArbiter.acquire_primary_device(
+                    conn=conn,
+                    dp_instance_id=payload.dp_instance_id,
+                    vault_id=vault_id,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                )
+            cur = conn.execute(
+                "SELECT is_primary FROM dp_instances WHERE dp_instance_id = ?",
+                (payload.dp_instance_id,),
+            ).fetchone()
+            return PrimaryDeviceResponse(
+                dp_instance_id=payload.dp_instance_id,
+                is_primary=bool(cur["is_primary"]) if cur else False,
+                effective_from=now_iso,
             )
 
     @app.post(
@@ -1136,6 +1255,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # -------------------------------------------------------------------------
     # Milestone M4: Chat Threads & SSE Turns
     # -------------------------------------------------------------------------
+    @app.get("/chat/threads", tags=["Chat"])
+    def list_chat_threads_endpoint(
+        limit: int = Query(50, ge=1, le=200),
+        auth: dict = Depends(authenticate_tenancy),
+    ):
+        vault_id = auth.get("vault_id") or "vlt_default"
+        threads = db.list_chat_threads(vault_id=vault_id, limit=limit)
+        return {"threads": threads}
+
+    @app.get("/chat/threads/{thread_id}/turns", tags=["Chat"])
+    def list_chat_turns_endpoint(
+        thread_id: str,
+        auth: dict = Depends(authenticate_tenancy),
+    ):
+        vault_id = auth.get("vault_id") or "vlt_default"
+        thread = db.get_chat_thread(thread_id)
+        if not thread or thread["vault_id"] != vault_id:
+            raise HTTPException(status_code=404, detail="Thread not found")
+        rows = db.all(
+            "SELECT * FROM chat_turns WHERE thread_id = ? AND vault_id = ? ORDER BY turn_index ASC",
+            (thread_id, vault_id),
+        )
+        return {"thread_id": thread_id, "turns": [dict(r) for r in rows]}
+
     @app.post("/chat/threads", status_code=201, response_model=ChatThreadDto, tags=["Chat"])
     def create_chat_thread_endpoint(
         body: ChatThreadCreateRequest | None = None,
@@ -1456,6 +1599,157 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             tenant_id=tenant_id,
             vault_id=vault_id,
             mutations=body.mutations,
+        )
+
+    # -------------------------------------------------------------------------
+    # Hemory Timeline Day, Memory Events & Segment Audio Streaming
+    # -------------------------------------------------------------------------
+    @app.get("/timeline/day", tags=["Timeline"])
+    @app.get("/v1/timeline/day", tags=["Timeline"], include_in_schema=False)
+    def get_timeline_day_endpoint(
+        date: str | None = Query(default=None),
+        tz: str = Query(default="Asia/Shanghai"),
+        auth: dict = Depends(authenticate_tenancy),
+    ):
+        vault_id = auth.get("vault_id") or "vlt_default"
+        return build_timeline_day_response(
+            db=db,
+            vault_id=vault_id,
+            date_str=date,
+            tz_name=tz,
+        )
+
+    @app.get("/memory-events", tags=["Timeline"])
+    def list_memory_events_endpoint(
+        limit: int = Query(50, ge=1, le=200),
+        q: str | None = Query(default=None, max_length=200),
+        auth: dict = Depends(authenticate_tenancy),
+    ):
+        vault_id = auth.get("vault_id") or "vlt_default"
+        if q and q.strip():
+            like_pat = f"%{q.strip()}%"
+            rows = db.all(
+                """SELECT * FROM memory_events
+                   WHERE vault_id = ? AND (title LIKE ? OR summary LIKE ? OR keywords LIKE ?)
+                   ORDER BY start_time DESC LIMIT ?""",
+                (vault_id, like_pat, like_pat, like_pat, limit),
+            )
+        else:
+            rows = db.all(
+                "SELECT * FROM memory_events WHERE vault_id = ? ORDER BY start_time DESC LIMIT ?",
+                (vault_id, limit),
+            )
+        events_out = []
+        for r in rows:
+            raw_cat = str(r.get("category") or "").strip().lower()
+            clean_cat = "" if raw_cat in {"unknown", "general", "uncategorized"} else raw_cat
+            try:
+                spks = json.loads(r.get("speaker_names") or "[]")
+            except Exception:
+                spks = []
+            try:
+                kws = json.loads(r.get("keywords") or "[]")
+            except Exception:
+                kws = []
+            title = str(r.get("title") or "").strip()
+            summary = str(r.get("summary") or "").strip()
+            if summary == title:
+                summary = ""
+            events_out.append(
+                {
+                    "event_id": r["event_id"],
+                    "session_id": r.get("session_id"),
+                    "title": title,
+                    "summary": summary,
+                    "category": clean_cat,
+                    "start_time": r["start_time"],
+                    "end_time": r["end_time"],
+                    "speaker_names": spks,
+                    "keywords": kws,
+                }
+            )
+        return {"events": events_out}
+
+    @app.get("/memory-events/{event_id}", tags=["Timeline"])
+    def get_memory_event_endpoint(
+        event_id: str,
+        tz: str = Query(default="Asia/Shanghai"),
+        auth: dict = Depends(authenticate_tenancy),
+    ):
+        vault_id = auth.get("vault_id") or "vlt_default"
+        detail = get_memory_event_detail(db=db, vault_id=vault_id, event_id=event_id, tz_name=tz)
+        if not detail:
+            raise HTTPException(status_code=404, detail="Memory event not found")
+        return detail
+
+    @app.patch("/memory-events/{event_id}", tags=["Timeline"])
+    def patch_memory_event_endpoint(
+        event_id: str,
+        body: MemoryEventPatchRequest,
+        auth: dict = Depends(authenticate_tenancy),
+    ):
+        vault_id = auth.get("vault_id") or "vlt_default"
+        tenant_id = auth.get("tenant_id") or "ten_default"
+        existing = db.one(
+            "SELECT * FROM memory_events WHERE event_id = ? AND vault_id = ?",
+            (event_id, vault_id),
+        )
+        if not existing:
+            raise HTTPException(status_code=404, detail="Memory event not found")
+
+        new_title = body.title.strip() if body.title is not None else existing["title"]
+        new_summary = body.summary.strip() if body.summary is not None else existing["summary"]
+        new_cat = existing["category"]
+        if body.category is not None:
+            cand = body.category.strip().lower()
+            if cand not in VALID_CATEGORIES:
+                raise HTTPException(status_code=422, detail=f"Invalid category: {body.category}")
+            new_cat = cand
+
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+        with db.connect(immediate=True) as c:
+            c.execute(
+                """UPDATE memory_events
+                   SET title = ?, summary = ?, category = ?, updated_at = ?
+                   WHERE event_id = ? AND vault_id = ?""",
+                (new_title, new_summary, new_cat, now_iso, event_id, vault_id),
+            )
+        db.append_recording_mutation(
+            tenant_id=tenant_id,
+            vault_id=vault_id,
+            entity_type="event",
+            entity_id=event_id,
+            mutation_type="event_created",
+            payload_json={
+                "tenant_id": tenant_id,
+                "event_type": "activity",
+                "title": new_title,
+                "summary": new_summary,
+                "category": new_cat,
+            },
+        )
+        return get_memory_event_detail(db=db, vault_id=vault_id, event_id=event_id)
+
+    @app.get("/recordings/segments/{segment_id}/audio", tags=["Recordings"])
+    def stream_recording_segment_audio(
+        segment_id: str,
+        auth: dict = Depends(authenticate_tenancy),
+    ):
+        vault_id = auth.get("vault_id") or "vlt_default"
+        seg = db.one(
+            "SELECT * FROM recording_segments WHERE segment_id = ? AND vault_id = ?",
+            (segment_id, vault_id),
+        )
+        if not seg or not seg.get("storage_key"):
+            raise HTTPException(status_code=404, detail="Recording segment audio not found")
+        try:
+            audio_bytes = storage.read_recording(seg["storage_key"])
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Audio file missing from storage") from exc
+        return Response(
+            content=audio_bytes,
+            media_type="audio/aac",
+            headers={"Cache-Control": "private, max-age=3600"},
         )
 
     app.include_router(router)

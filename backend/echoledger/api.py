@@ -117,6 +117,45 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if u:
                     tenant_id = u["tenant_id"]
 
+            path_tenant = request.path_params.get("tenant_id") or request.path_params.get("tenantId")
+            if tenant_id and path_tenant and tenant_id != path_tenant:
+                raise HTTPException(status_code=403, detail="Cross-tenant access forbidden")
+
+            if h_vault:
+                vault_row = db.get_vault(h_vault, tenant_id) if tenant_id else None
+                if not vault_row:
+                    raise HTTPException(status_code=404, detail="Vault not found")
+                vault_id = vault_row["vault_id"]
+            else:
+                vault_id = None
+                if binding and dp_instance_id and tenant_id:
+                    dp_row = db.one(
+                        "SELECT vault_id FROM dp_instances WHERE dp_instance_id=? AND tenant_id=?",
+                        (dp_instance_id, tenant_id),
+                    )
+                    if dp_row and dp_row.get("vault_id"):
+                        vault_id = dp_row["vault_id"]
+
+                if not vault_id and tenant_id:
+                    def_vlt = db.one(
+                        "SELECT vault_id FROM vaults WHERE tenant_id=? AND is_default=1 LIMIT 1",
+                        (tenant_id,),
+                    )
+                    if def_vlt and def_vlt.get("vault_id"):
+                        vault_id = def_vlt["vault_id"]
+                    else:
+                        any_vlt = db.one(
+                            "SELECT vault_id FROM vaults WHERE tenant_id=? LIMIT 1",
+                            (tenant_id,),
+                        )
+                        if any_vlt and any_vlt.get("vault_id"):
+                            vault_id = any_vlt["vault_id"]
+
+                has_vault_in_path = "vault_id" in request.path_params or "vaultId" in request.path_params
+                is_tenant_only_endpoint = bool(path_tenant and not has_vault_in_path)
+                if not vault_id and not is_tenant_only_endpoint:
+                    raise HTTPException(status_code=404, detail="Vault not found")
+
         return {
             "token": token,
             "is_admin": is_admin,

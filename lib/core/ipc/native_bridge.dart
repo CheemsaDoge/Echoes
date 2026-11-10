@@ -289,6 +289,7 @@ class NativeBridgeChannel implements INativeBridge {
     final invoker = _invoker;
     if (invoker != null) {
       final res = await invoker('retryFailedUploads');
+      if (res is num) return res >= 0;
       return (res as bool?) ?? false;
     }
     return true;

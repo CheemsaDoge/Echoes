@@ -6,6 +6,16 @@ import 'package:http/http.dart' as http;
 import '../models/speaker_models.dart';
 import '../models/timeline_models.dart';
 
+String localUtcOffsetTimezone([DateTime? reference]) {
+  final offset = (reference ?? DateTime.now()).timeZoneOffset;
+  if (offset.inMinutes == 0) return 'UTC';
+  final sign = offset.isNegative ? '-' : '+';
+  final totalMin = offset.inMinutes.abs();
+  final hh = (totalMin ~/ 60).toString().padLeft(2, '0');
+  final mm = (totalMin % 60).toString().padLeft(2, '0');
+  return 'UTC$sign$hh:$mm';
+}
+
 class HemoryApiException implements Exception {
   final int statusCode;
   final String message;
@@ -291,11 +301,6 @@ class HemoryApiClient {
   Future<Map<String, dynamic>> verifyAndEnsurePrimary({
     String deviceName = 'Hemory Android',
   }) async {
-    final statusResp = await _client
-        .get(Uri.parse('$baseUrl/v1/status'), headers: defaultHeaders)
-        .timeout(const Duration(seconds: 10));
-    final statusJson = await _decodeJsonResponse(statusResp);
-
     final ensureResp = await _client
         .post(
           Uri.parse('$baseUrl/dp-instances/ensure'),
@@ -309,16 +314,28 @@ class HemoryApiClient {
           }),
         )
         .timeout(const Duration(seconds: 10));
-    await _decodeJsonResponse(ensureResp);
-    return statusJson;
+    final ensureJson = await _decodeJsonResponse(ensureResp);
+
+    try {
+      final statusResp = await _client
+          .get(Uri.parse('$baseUrl/v1/status'), headers: defaultHeaders)
+          .timeout(const Duration(seconds: 8));
+      if (statusResp.statusCode >= 200 && statusResp.statusCode < 300) {
+        return await _decodeJsonResponse(statusResp);
+      }
+    } catch (_) {}
+    return ensureJson;
   }
 
   Future<TimelineDayPayload> fetchTimelineDay({
     required String date,
-    String tz = 'Asia/Shanghai',
+    String? tz,
   }) async {
+    final effectiveTz = (tz != null && tz.trim().isNotEmpty)
+        ? tz.trim()
+        : localUtcOffsetTimezone();
     final uri = Uri.parse('$baseUrl/timeline/day').replace(
-      queryParameters: {'date': date, 'tz': tz},
+      queryParameters: {'date': date, 'tz': effectiveTz},
     );
     final resp = await _client
         .get(uri, headers: defaultHeaders)
@@ -468,10 +485,13 @@ class HemoryApiClient {
 
   Future<MemoryEventDetail> fetchMemoryEventDetail(
     String eventId, {
-    String tz = 'Asia/Shanghai',
+    String? tz,
   }) async {
+    final effectiveTz = (tz != null && tz.trim().isNotEmpty)
+        ? tz.trim()
+        : localUtcOffsetTimezone();
     final uri = Uri.parse('$baseUrl/memory-events/$eventId').replace(
-      queryParameters: {'tz': tz},
+      queryParameters: {'tz': effectiveTz},
     );
     final resp = await _client
         .get(uri, headers: defaultHeaders)
@@ -631,13 +651,15 @@ class HemoryApiClient {
 
   Future<int> fetchLatestMutationCursor({int after = 0}) async {
     final uri = Uri.parse('$baseUrl/recording-mutations').replace(
-      queryParameters: {'after': after.toString(), 'limit': '50'},
+      queryParameters: {'after': after.toString(), 'limit': '1'},
     );
     final resp = await _client
         .get(uri, headers: defaultHeaders)
         .timeout(const Duration(seconds: 8));
     final json = await _decodeJsonResponse(resp);
-    return (json['next_cursor'] as num?)?.toInt() ?? after;
+    return (json['latest_cursor'] as num?)?.toInt() ??
+        (json['next_cursor'] as num?)?.toInt() ??
+        after;
   }
 
   void dispose() {

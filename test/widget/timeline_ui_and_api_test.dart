@@ -1,11 +1,20 @@
+import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+import 'package:hemory/core/ipc/event_channels.dart';
 import 'package:hemory/core/ipc/native_bridge.dart';
+import 'package:hemory/core/models/recording_state.dart';
 import 'package:hemory/core/models/timeline_models.dart';
+import 'package:hemory/core/providers/app_providers.dart';
 import 'package:hemory/core/services/hemory_api_client.dart';
+import 'package:hemory/core/services/sse_chat_service.dart';
 import 'package:hemory/ui/cards/activity_card.dart';
 import 'package:hemory/ui/cards/scattered_chat_card.dart';
+import 'package:hemory/ui/timeline/event_detail_sheet.dart';
 import 'package:hemory/ui/timeline/memory_timeline_scene.dart';
 
 void main() {
@@ -198,5 +207,126 @@ void main() {
 
     expect(rectFirst.bottom, lessThanOrEqualTo(rectScattered.top));
     expect(rectScattered.bottom, lessThanOrEqualTo(rectLast.top));
+  });
+
+  test('RecordingController hydrates underlying RecordingService and allows stopRecording + integer retryFailedUploads', () async {
+    var stopCalled = false;
+    final bridge = NativeBridgeChannel(
+      invoker: (method, [args]) async {
+        switch (method) {
+          case 'getRecordingState':
+            return 'recording';
+          case 'stopRecording':
+            stopCalled = true;
+            return true;
+          case 'retryFailedUploads':
+            return 3; // Android NativeBridgePlugin returns Int count
+          default:
+            return null;
+        }
+      },
+    );
+    final streams = RecordingEventStreams(
+      stateStream: const Stream<RecordingStateSnapshot>.empty(),
+      eventsStream: const Stream<RecordingLifecycleEvent>.empty(),
+      meteringStream: const Stream<MeteringSnapshot>.empty(),
+      segmentsStream: const Stream<SegmentCompletedEvent>.empty(),
+    );
+
+    final controller = RecordingController(bridge: bridge, streams: streams);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(controller.state.captureState, equals(RecordingCaptureState.recording));
+
+    final stopped = await controller.stopRecording();
+    expect(stopped, isTrue);
+    expect(stopCalled, isTrue);
+    expect(controller.state.captureState, equals(RecordingCaptureState.stopping));
+
+    expect(await bridge.retryFailedUploads(), isTrue);
+    controller.dispose();
+  });
+
+  test('SseChatService omits x-user-id by default and surfaces non-200 HTTP errors as error events', () async {
+    Map<String, String>? capturedHeaders;
+    final mockHttp = MockClient((request) async {
+      capturedHeaders = request.headers;
+      return http.Response(
+        jsonEncode({'detail': 'Header x-user-id mismatch'}),
+        403,
+        headers: {'content-type': 'application/json'},
+      );
+    });
+
+    final service = SseChatService(baseUrl: 'https://record.xmdoge.com', client: mockHttp);
+    final events = await service
+        .sendChatTurn(
+          threadId: 'th_1',
+          prompt: '昨天聊了什么',
+          authToken: 'tok_binding',
+        )
+        .toList();
+
+    expect(capturedHeaders, isNotNull);
+    expect(capturedHeaders!.containsKey('x-user-id'), isFalse);
+    expect(events, hasLength(1));
+    expect(events.first.event, equals('error'));
+    expect(events.first.data['message'], contains('403'));
+    service.dispose();
+  });
+
+  testWidgets('EventDetailSheet resolves clipped _part0 intervalId back to canonical payload event_id', (tester) async {
+    String? requestedPath;
+    final mockHttp = MockClient((request) async {
+      requestedPath = request.url.path;
+      return http.Response(
+        jsonEncode({
+          'event_id': 'ev_real_99',
+          'title': '跨时段裁剪事件',
+          'summary': '验证裁剪后缀不会导致404',
+          'category': 'work',
+          'start_time': '21:00',
+          'end_time': '21:15',
+          'duration_ms': 900000,
+          'utterances': [],
+        }),
+        200,
+        headers: {'content-type': 'application/json; charset=utf-8'},
+      );
+    });
+    final apiClient = HemoryApiClient(
+      baseUrl: 'https://record.xmdoge.com',
+      authToken: 'tok_test',
+      client: mockHttp,
+    );
+    addTearDown(apiClient.dispose);
+
+    final clippedInterval = TimelineInterval(
+      intervalId: 'ev_real_99_part0',
+      startMs: 1260,
+      endMs: 1270,
+      tier: TimelineTier.p2Activity,
+      itemType: 'Activity',
+      payload: {
+        'event_id': 'ev_real_99',
+        'title': '跨时段裁剪事件',
+      },
+    );
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          apiClientProvider.overrideWithValue(apiClient),
+        ],
+        child: MaterialApp(
+          home: Scaffold(
+            body: EventDetailSheet(interval: clippedInterval),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(requestedPath, equals('/memory-events/ev_real_99'));
+    expect(find.text('验证裁剪后缀不会导致404'), findsOneWidget);
   });
 }

@@ -28,7 +28,8 @@ class _SettingsSceneState extends ConsumerState<SettingsScene> {
     'uploaded': 0,
   };
   String _asrProvider = 'vertexai';
-  String _asrModel = 'gemini-3.8-flash';
+  String _vertexModel = 'gemini-3.8-flash';
+  String _geminiModel = 'gemini-2.5-flash';
   double _similarityThreshold = 0.72;
   bool _autoMatchEnabled = true;
   bool _configLoaded = false;
@@ -75,13 +76,19 @@ class _SettingsSceneState extends ConsumerState<SettingsScene> {
       if (!mounted) return;
       final asr = (cfg['asr'] as Map?) ?? const {};
       final vp = (cfg['voiceprint'] as Map?) ?? const {};
-      final prov = (asr['asr_provider'] as String?) ?? 'vertexai';
-      final mod = prov == 'vertexai'
-          ? ((asr['vertex_model'] as String?) ?? 'gemini-3.8-flash')
-          : ((asr['gemini_model'] as String?) ?? 'gemini-2.5-flash');
+      final rawProv = ((asr['asr_provider'] as String?) ?? 'vertexai').trim().toLowerCase();
+      final normalizedProv = switch (rawProv) {
+        'vertexai' => 'vertexai',
+        'gemini' => 'gemini',
+        'disabled' || 'mock' => 'disabled',
+        _ => 'vertexai',
+      };
+      final vMod = ((asr['vertex_model'] as String?) ?? '').trim();
+      final gMod = ((asr['gemini_model'] as String?) ?? '').trim();
       setState(() {
-        _asrProvider = prov;
-        _asrModel = mod;
+        _asrProvider = normalizedProv;
+        if (vMod.isNotEmpty) _vertexModel = vMod;
+        if (gMod.isNotEmpty) _geminiModel = gMod;
         _similarityThreshold =
             ((vp['similarity_threshold'] as num?)?.toDouble() ?? 0.72)
                 .clamp(0.50, 0.95);
@@ -99,8 +106,8 @@ class _SettingsSceneState extends ConsumerState<SettingsScene> {
       await client.updateRuntimeConfig({
         'asr': {
           'asr_provider': _asrProvider,
-          if (_asrProvider == 'vertexai') 'vertex_model': _asrModel.trim(),
-          if (_asrProvider == 'gemini') 'gemini_model': _asrModel.trim(),
+          'vertex_model': _vertexModel.trim(),
+          'gemini_model': _geminiModel.trim(),
         },
         'voiceprint': {
           'similarity_threshold': double.parse(
@@ -338,6 +345,10 @@ class _SettingsSceneState extends ConsumerState<SettingsScene> {
                                   ButtonSegment(
                                     value: 'gemini',
                                     label: Text('Gemini API'),
+                                  ),
+                                  ButtonSegment(
+                                    value: 'disabled',
+                                    label: Text('关闭'),
                                   ),
                                 ],
                                 selected: {_asrProvider},

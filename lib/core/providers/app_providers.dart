@@ -47,10 +47,7 @@ class RecordingController extends StateNotifier<RecordingSessionState> {
       final wire = await _bridge.getRecordingState();
       final current = RecordingCaptureState.fromWire(wire);
       if (mounted && current.isActive && !state.isActive) {
-        state = state.copyWith(
-          captureState: current,
-          runningSinceMs: DateTime.now().millisecondsSinceEpoch,
-        );
+        _inner.hydrateFromNative(captureState: current);
       }
     } catch (_) {}
   }
@@ -262,7 +259,7 @@ class AuthSessionNotifier extends StateNotifier<AuthSession> {
           (DateTime.now().millisecondsSinceEpoch ~/ 1000) + 315360000; // 10y
       final tuple = Auth7Tuple(
         accessToken: cleanToken,
-        refreshToken: cleanToken,
+        refreshToken: 'direct_session',
         expiresAt: expiresSec,
         baseUrl: cleanUrl,
         slotConnectionType: 'direct',
@@ -335,7 +332,10 @@ final timelineDayProvider = FutureProvider<TimelineDayPayload>((ref) async {
   if (client == null) return TimelineDayPayload.empty;
   final selectedDate = ref.watch(selectedDateProvider);
   final dateStr = DateFormat('yyyy-MM-dd').format(selectedDate);
-  return client.fetchTimelineDay(date: dateStr);
+  return client.fetchTimelineDay(
+    date: dateStr,
+    tz: localUtcOffsetTimezone(selectedDate),
+  );
 });
 
 final speakersRefreshTickProvider = StateProvider<int>((ref) => 0);
@@ -355,7 +355,16 @@ final pendingClustersProvider =
   return client.fetchClusters(status: 'pending');
 });
 
-final activeAudioUrlProvider = StateProvider<String?>((ref) => null);
+final activeAudioUrlProvider = StateProvider<String?>((ref) {
+  final streams = ref.watch(recordingEventStreamsProvider);
+  final sub = streams.eventsStream.listen((event) {
+    if (event.type == 'AUDIO_PLAYBACK_COMPLETED') {
+      ref.controller.state = null;
+    }
+  });
+  ref.onDispose(sub.cancel);
+  return null;
+});
 
 Future<void> toggleAudioPreview(WidgetRef ref, String relativeOrFullUrl) async {
   final client = ref.read(apiClientProvider);
@@ -365,21 +374,27 @@ Future<void> toggleAudioPreview(WidgetRef ref, String relativeOrFullUrl) async {
   final fullUrl = client.resolveUrl(relativeOrFullUrl);
   final current = ref.read(activeAudioUrlProvider);
   if (current == fullUrl) {
-    await bridge.stopAudioPlayback();
+    try {
+      await bridge.stopAudioPlayback();
+    } catch (_) {}
     ref.read(activeAudioUrlProvider.notifier).state = null;
     return;
   }
 
   ref.read(activeAudioUrlProvider.notifier).state = fullUrl;
-  final ok = await bridge.playAudioUrl(
-    url: fullUrl,
-    authToken: client.authToken,
-    headers: {
-      'x-tenant-id': client.tenantId,
-      'x-vault-id': client.vaultId,
-    },
-  );
-  if (!ok) {
+  try {
+    final ok = await bridge.playAudioUrl(
+      url: fullUrl,
+      authToken: client.authToken,
+      headers: {
+        'x-tenant-id': client.tenantId,
+        'x-vault-id': client.vaultId,
+      },
+    );
+    if (!ok) {
+      ref.read(activeAudioUrlProvider.notifier).state = null;
+    }
+  } catch (_) {
     ref.read(activeAudioUrlProvider.notifier).state = null;
   }
 }

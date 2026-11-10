@@ -227,6 +227,27 @@ class RecordingService extends StateNotifier<RecordingSessionState> {
     state = const RecordingSessionState();
   }
 
+  /// Hydrates the state machine when attaching to an already-active native foreground service.
+  void hydrateFromNative({
+    required RecordingCaptureState captureState,
+    String? recordingId,
+    int elapsedMs = 0,
+  }) {
+    if (!captureState.isActive) return;
+    _cancelWatchdogs();
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    state = state.copyWith(
+      captureState: captureState,
+      activeRecordingId: recordingId ?? state.activeRecordingId,
+      elapsedMs: elapsedMs,
+      runningSinceMs: nowMs - elapsedMs,
+      clearError: true,
+    );
+    if (captureState == RecordingCaptureState.recovering) {
+      _armRecoveryWatchdog();
+    }
+  }
+
   void _armRecoveryWatchdog() {
     _recoveryWatchdog?.cancel();
     // 45s HAL deadlock watchdog timer per spec

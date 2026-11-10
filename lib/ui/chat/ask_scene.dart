@@ -62,6 +62,7 @@ class _AskSceneState extends ConsumerState<AskScene> {
     final client = ref.read(apiClientProvider);
     setState(() {
       _activeThreadId = threadId;
+      _history = const [];
       _loadingHistory = true;
     });
     if (client == null) {
@@ -70,7 +71,7 @@ class _AskSceneState extends ConsumerState<AskScene> {
     }
     try {
       final turns = await client.fetchChatTurns(threadId);
-      if (!mounted) return;
+      if (!mounted || _activeThreadId != threadId) return;
       final spkList = ref.read(speakersProvider).valueOrNull ?? const <SpeakerProfile>[];
       final resolver = SessionSpeakerResolver(
         speakerProfiles: {for (final s in spkList) s.speakerId: s},
@@ -97,7 +98,7 @@ class _AskSceneState extends ConsumerState<AskScene> {
         _loadingHistory = false;
       });
     } catch (_) {
-      if (mounted) {
+      if (mounted && _activeThreadId == threadId) {
         setState(() {
           _history = const [];
           _loadingHistory = false;

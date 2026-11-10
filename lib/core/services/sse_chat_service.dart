@@ -33,7 +33,7 @@ class SseChatService {
     required String authToken,
     String tenantId = 'ten_default',
     String vaultId = 'vlt_default',
-    String userId = 'usr_default',
+    String? userId,
     String? lastEventId,
     Map<String, dynamic>? clientContext,
   }) async* {
@@ -45,7 +45,9 @@ class SseChatService {
     request.headers['Accept'] = 'text/event-stream';
     request.headers['x-tenant-id'] = tenantId;
     request.headers['x-vault-id'] = vaultId;
-    request.headers['x-user-id'] = userId;
+    if (userId != null && userId.trim().isNotEmpty) {
+      request.headers['x-user-id'] = userId.trim();
+    }
     if (lastEventId != null) {
       request.headers['Last-Event-ID'] = lastEventId;
     }
@@ -56,6 +58,30 @@ class SseChatService {
     });
 
     final response = await _client.send(request);
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      final rawBody = await response.stream.bytesToString();
+      String detail = response.reasonPhrase ?? 'Request failed';
+      try {
+        final err = jsonDecode(rawBody);
+        if (err is Map) {
+          final d = err['detail'] ?? err['message'] ?? err['error'];
+          if (d != null) detail = d.toString();
+        } else if (rawBody.trim().isNotEmpty) {
+          detail = rawBody.trim();
+        }
+      } catch (_) {
+        if (rawBody.trim().isNotEmpty) detail = rawBody.trim();
+      }
+      yield ChatTurnEvent(
+        event: 'error',
+        data: {
+          'status': response.statusCode,
+          'message': 'HTTP ${response.statusCode}: $detail',
+        },
+      );
+      return;
+    }
+
     final stream = response.stream.transform(utf8.decoder).transform(const LineSplitter());
 
     String? currentId;

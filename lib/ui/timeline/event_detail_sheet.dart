@@ -67,12 +67,23 @@ class _EventDetailSheetState extends ConsumerState<EventDetailSheet> {
     super.dispose();
   }
 
+  String get _canonicalEventId {
+    final fromPayload = (widget.interval.payload?['event_id'] as String?)?.trim();
+    if (fromPayload != null && fromPayload.isNotEmpty) {
+      return fromPayload;
+    }
+    return widget.interval.intervalId.replaceFirst(RegExp(r'_part\d+$'), '');
+  }
+
   Future<void> _loadEventDetail() async {
     final client = ref.read(apiClientProvider);
     if (client == null) return;
     setState(() => _loading = true);
     try {
-      final detail = await client.fetchMemoryEventDetail(widget.interval.intervalId);
+      final detail = await client.fetchMemoryEventDetail(
+        _canonicalEventId,
+        tz: localUtcOffsetTimezone(ref.read(selectedDateProvider)),
+      );
       if (!mounted) return;
       setState(() {
         _detail = detail;
@@ -89,7 +100,7 @@ class _EventDetailSheetState extends ConsumerState<EventDetailSheet> {
     if (client == null) return;
     try {
       final updated = await client.patchMemoryEvent(
-        widget.interval.intervalId,
+        _canonicalEventId,
         title: title,
         category: category,
       );

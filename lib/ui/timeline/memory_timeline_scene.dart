@@ -38,7 +38,8 @@ class _MemoryTimelineSceneState extends ConsumerState<MemoryTimelineScene> {
   TimelineViewMode _viewMode = TimelineViewMode.river;
   StreamSubscription<SegmentCompletedEvent>? _segmentSub;
   Timer? _mutationPollTimer;
-  int _lastMutationCursor = 0;
+  int? _lastMutationCursor;
+  String _cursorVaultKey = '';
 
   @override
   void initState() {
@@ -62,24 +63,47 @@ class _MemoryTimelineSceneState extends ConsumerState<MemoryTimelineScene> {
       });
     });
 
+    unawaited(_seedMutationCursor());
+
     _mutationPollTimer = Timer.periodic(const Duration(seconds: 6), (_) async {
       if (!mounted) return;
       final client = ref.read(apiClientProvider);
       if (client == null) return;
+      final key = '${client.baseUrl}|${client.vaultId}';
+      if (_cursorVaultKey != key) {
+        _cursorVaultKey = key;
+        _lastMutationCursor = null;
+      }
       try {
         final next = await client.fetchLatestMutationCursor(
-          after: _lastMutationCursor,
+          after: _lastMutationCursor ?? 0,
         );
         if (!mounted) return;
-        if (_lastMutationCursor == 0) {
+        if (_lastMutationCursor == null) {
           _lastMutationCursor = next;
-        } else if (next > _lastMutationCursor) {
+          if (next > 0) {
+            ref.read(timelineRefreshTickProvider.notifier).state++;
+            ref.read(speakersRefreshTickProvider.notifier).state++;
+          }
+        } else if (next > _lastMutationCursor!) {
           _lastMutationCursor = next;
           ref.read(timelineRefreshTickProvider.notifier).state++;
           ref.read(speakersRefreshTickProvider.notifier).state++;
         }
       } catch (_) {}
     });
+  }
+
+  Future<void> _seedMutationCursor() async {
+    if (!mounted) return;
+    final client = ref.read(apiClientProvider);
+    if (client == null) return;
+    _cursorVaultKey = '${client.baseUrl}|${client.vaultId}';
+    try {
+      final latest = await client.fetchLatestMutationCursor(after: 0);
+      if (!mounted) return;
+      _lastMutationCursor ??= latest;
+    } catch (_) {}
   }
 
   @override

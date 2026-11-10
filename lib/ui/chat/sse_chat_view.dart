@@ -94,7 +94,7 @@ class _SseChatViewState extends State<SseChatView> {
       _resolver = widget.speakerResolver!;
     }
     if (oldWidget.threadId != widget.threadId ||
-        (_messages.isEmpty && widget.initialMessages.isNotEmpty)) {
+        (!_isSending && !identical(oldWidget.initialMessages, widget.initialMessages))) {
       _messages = List<ChatMessageItem>.from(widget.initialMessages);
     }
   }

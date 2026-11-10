@@ -200,17 +200,31 @@ class UploadService:
                 detail=f"capture_metadata must be valid JSON: {exc}",
             ) from exc
 
+        raw_idx = metadata.get("segment_index", 0)
+        if isinstance(raw_idx, (bool, float)):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="segment_index in capture_metadata must be an integer, not float or boolean",
+            )
         try:
-            segment_index = int(metadata.get("segment_index", 0))
-        except (ValueError, TypeError) as ex:
+            if isinstance(raw_idx, str):
+                clean_str = raw_idx.strip()
+                if not (
+                    clean_str.isdigit()
+                    or (clean_str.startswith(("-", "+")) and clean_str[1:].isdigit())
+                ):
+                    raise ValueError(f"invalid literal for integer: '{raw_idx}'")
+            segment_index = int(raw_idx)
+        except (ValueError, TypeError, OverflowError) as ex:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=f"Invalid segment_index in capture_metadata: must be integer ({ex})",
             ) from ex
-        if segment_index < 0:
+
+        if segment_index < 0 or segment_index > 9223372036854775807:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="segment_index in capture_metadata must be non-negative",
+                detail="segment_index in capture_metadata must be between 0 and 9223372036854775807",
             )
 
         # 2. Timing & Clock drift verification

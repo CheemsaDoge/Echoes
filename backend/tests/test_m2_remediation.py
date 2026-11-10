@@ -284,7 +284,42 @@ def test_unhandled_permission_error_caught_as_403(remediation_env):
 
 @pytest.mark.parametrize(
     "bad_idx",
-    ["not_an_int", "12.34", "NaN", None, -1, -99, [1, 2], {"idx": 1}],
+    [
+        "not_an_int",
+        "12.34",
+        "NaN",
+        None,
+        -1,
+        -99,
+        [1, 2],
+        {"idx": 1},
+        # Raw floats (previously truncated or bypassed negative check)
+        12.34,
+        0.1,
+        0.9,
+        3.14159,
+        1e2,
+        -0.5,
+        -1.5,
+        float("inf"),
+        float("-inf"),
+        float("nan"),
+        # Booleans (previously coerced to 1 / 0)
+        True,
+        False,
+        # SQLite 64-bit signed integer bounds
+        10**30,
+        2**63,
+        -9223372036854775809,
+        # Special strings
+        "",
+        "   ",
+        "-",
+        "+",
+        "0x10",
+        "Infinity",
+        "-Infinity",
+    ],
 )
 def test_invalid_segment_index_returns_422(remediation_env, bad_idx):
     _, _, settings, client = remediation_env
@@ -299,7 +334,7 @@ def test_invalid_segment_index_returns_422(remediation_env, bad_idx):
         "x-dp-instance-id": "dp_alice_phone",
     }
     meta = {
-        "live_session_id": "sess_idx_test",
+        "live_session_id": f"sess_idx_test_{abs(hash(str(bad_idx)))}",
         "segment_index": bad_idx,
         "dp_instance_id": "dp_alice_phone",
     }
@@ -316,6 +351,87 @@ def test_invalid_segment_index_returns_422(remediation_env, bad_idx):
         headers=headers,
     )
     assert res.status_code == 422, f"Expected 422 for bad_idx={bad_idx}, got {res.status_code}: {res.text}"
+
+
+@pytest.mark.parametrize(
+    "raw_json_payload",
+    [
+        '{"dp_instance_id": "dp_alice_phone", "segment_index": 1e1000}',
+        '{"dp_instance_id": "dp_alice_phone", "segment_index": Infinity}',
+        '{"dp_instance_id": "dp_alice_phone", "segment_index": -Infinity}',
+        '{"dp_instance_id": "dp_alice_phone", "segment_index": NaN}',
+        '{"dp_instance_id": "dp_alice_phone", "segment_index": true}',
+        '{"dp_instance_id": "dp_alice_phone", "segment_index": false}',
+        '{"dp_instance_id": "dp_alice_phone", "segment_index": -0.5}',
+        '{"dp_instance_id": "dp_alice_phone", "segment_index": 12.34}',
+        '{"dp_instance_id": "dp_alice_phone", "segment_index": 0.1}',
+        '{"dp_instance_id": "dp_alice_phone", "segment_index": ' + str(10**30) + '}',
+        '{"dp_instance_id": "dp_alice_phone", "segment_index": ' + str(2**63) + '}',
+        '{"dp_instance_id": "dp_alice_phone", broken}',
+        '[{"segment_index": 0}]',
+    ],
+)
+def test_raw_json_fuzzing_segment_index_returns_422(remediation_env, raw_json_payload):
+    _, _, settings, client = remediation_env
+    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+    stream = make_adts_stream(3)
+
+    headers = {
+        "Authorization": f"Bearer {settings.api_token}",
+        "x-tenant-id": "t_alpha",
+        "x-vault-id": "v_alpha_1",
+        "x-user-id": "u_alice",
+        "x-dp-instance-id": "dp_alice_phone",
+    }
+    data = {
+        "started_at": now_iso,
+        "format": "aac",
+        "source": "ambient",
+        "capture_metadata": raw_json_payload,
+    }
+    res = client.post(
+        "/tenants/t_alpha/vaults/v_alpha_1/recordings/upload",
+        data=data,
+        files={"file": ("chunk.aac", stream, "audio/aac")},
+        headers=headers,
+    )
+    assert res.status_code == 422, f"Expected 422 for raw_json_payload={raw_json_payload}, got {res.status_code}: {res.text}"
+
+
+@pytest.mark.parametrize(
+    "valid_idx",
+    [0, 1, 42, "42", 9223372036854775807, "0"],
+)
+def test_valid_segment_index_accepted(remediation_env, valid_idx):
+    _, _, settings, client = remediation_env
+    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+    stream = make_adts_stream(3)
+
+    headers = {
+        "Authorization": f"Bearer {settings.api_token}",
+        "x-tenant-id": "t_alpha",
+        "x-vault-id": "v_alpha_1",
+        "x-user-id": "u_alice",
+        "x-dp-instance-id": "dp_alice_phone",
+    }
+    meta = {
+        "live_session_id": f"sess_valid_idx_{valid_idx}",
+        "segment_index": valid_idx,
+        "dp_instance_id": "dp_alice_phone",
+    }
+    data = {
+        "started_at": now_iso,
+        "format": "aac",
+        "source": "ambient",
+        "capture_metadata": json.dumps(meta),
+    }
+    res = client.post(
+        "/tenants/t_alpha/vaults/v_alpha_1/recordings/upload",
+        data=data,
+        files={"file": ("chunk.aac", stream, "audio/aac")},
+        headers=headers,
+    )
+    assert res.status_code == 201, f"Expected 201 for valid_idx={valid_idx}, got {res.status_code}: {res.text}"
 
 
 def test_omitted_segment_index_defaults_to_zero(remediation_env):

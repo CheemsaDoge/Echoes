@@ -17,7 +17,11 @@ from .models import (SessionCreate, SessionClose, ChunkMeta, ProfileCreate, Eval
                      PrimaryDeviceResponse, UploadRecordingResponse,
                      SpeakerProfileDto, SpeakerListResponse, SpeakerCreateRequest, SpeakerCreateResponse,
                      VoiceprintClusterDto, ClusterListResponse, ClusterSampleDto, ClusterSamplesResponse,
-                     ClusterPatchRequest, ClusterPatchResponse)
+                     ClusterPatchRequest, ClusterPatchResponse,
+                     ChatTurnCreateRequest, ChatTurnCancelResponse, ChatThreadCreateRequest,
+                     ChatThreadDto, ChatTurnDto, ProcessingChainDto, ProcessingChainsResponse,
+                     RecordingMutationDto, RecordingMutationsResponse,
+                     ClientRecordingMutationsRequest, ClientRecordingMutationsResponse)
 from .pipeline import Pipeline, plan_batches
 from .worker import run_loop
 from .queries import list_events, get_event, search_memories
@@ -27,6 +31,10 @@ from .vad import speech_intervals, score_intervals
 from .lease import LeaseRejectionException, PrimaryLeaseArbiter
 from .storage import StorageService
 from .upload import UploadService, AudioBitstreamException
+from .sse import TurnStreamManager, SSE_HEADERS, parse_last_event_id
+from .chat import GeminiChatAgent, SyntheticGeminiAgent
+from .sync import (get_processing_chains_response, get_recording_mutations_response,
+                   record_client_mutations)
 from . import mcp
 
 
@@ -54,8 +62,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                   docs_url="/docs", redoc_url=None)
     storage = StorageService(settings.data_dir)
     upload_service = UploadService(db, storage, settings.max_upload_bytes)
+    turn_manager = TurnStreamManager(retention_seconds=60.0)
     app.state.db, app.state.pipeline, app.state.settings = db, pipeline, settings
-    app.state.storage, app.state.upload_service = storage, upload_service
+    app.state.storage, app.state.upload_service, app.state.turn_manager = storage, upload_service, turn_manager
 
     @app.exception_handler(LeaseRejectionException)
     def lease_rejection_handler(request: Request, exc: LeaseRejectionException):
@@ -1123,6 +1132,237 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def usage():
         return {"days": db.all("SELECT day,provider,SUM(audio_seconds) AS reserved_audio_seconds,COUNT(*) AS attempts FROM usage GROUP BY day,provider ORDER BY day DESC LIMIT 60"),
                 "daily_limit_seconds": None, "basis": "UTC request-day, conservative pre-request reservation; not a billing invoice"}
+
+    # -------------------------------------------------------------------------
+    # Milestone M4: Chat Threads & SSE Turns
+    # -------------------------------------------------------------------------
+    @app.post("/chat/threads", status_code=201, response_model=ChatThreadDto, tags=["Chat"])
+    def create_chat_thread_endpoint(
+        body: ChatThreadCreateRequest | None = None,
+        auth: dict = Depends(authenticate_tenancy),
+    ):
+        vault_id = auth.get("vault_id") or "vlt_default"
+        tenant_id = auth.get("tenant_id") or "ten_default"
+        user_id = auth.get("user_id") or "usr_default"
+
+        req = body or ChatThreadCreateRequest()
+        thread_id = req.thread_id or f"th_{secrets.token_hex(8)}"
+        title = req.title or "New Chat"
+
+        # If thread already exists in another vault, raise 404 to avoid enumeration
+        existing = db.get_chat_thread(thread_id)
+        if existing:
+            if existing["vault_id"] != vault_id:
+                raise HTTPException(status_code=404, detail="Thread not found")
+            return existing
+
+        created = db.create_chat_thread(
+            thread_id=thread_id,
+            tenant_id=tenant_id,
+            vault_id=vault_id,
+            user_id=user_id,
+            title=title,
+            metadata=req.metadata,
+        )
+        return created
+
+    @app.get("/chat/threads/{thread_id}", response_model=ChatThreadDto, tags=["Chat"])
+    def get_chat_thread_endpoint(
+        thread_id: str,
+        auth: dict = Depends(authenticate_tenancy),
+    ):
+        vault_id = auth.get("vault_id") or "vlt_default"
+        thread = db.get_chat_thread(thread_id)
+        if not thread or thread["vault_id"] != vault_id:
+            raise HTTPException(status_code=404, detail="Thread not found")
+        return thread
+
+    @app.post("/chat/threads/{thread_id}/turns", tags=["Chat"])
+    async def stream_chat_turn_endpoint(
+        thread_id: str,
+        payload: ChatTurnCreateRequest,
+        request: Request,
+        auth: dict = Depends(authenticate_tenancy),
+    ):
+        vault_id = auth.get("vault_id") or "vlt_default"
+        tenant_id = auth.get("tenant_id") or "ten_default"
+        user_id = auth.get("user_id") or "usr_default"
+
+        # Multi-tenant scoping & 404 Anti-Enumeration & On-the-fly thread creation
+        thread = db.get_chat_thread(thread_id)
+        if thread:
+            if thread["vault_id"] != vault_id:
+                raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
+        else:
+            # Auto-create thread in caller's vault if unallocated
+            db.create_chat_thread(
+                thread_id=thread_id,
+                tenant_id=tenant_id,
+                vault_id=vault_id,
+                user_id=user_id,
+                title=payload.effective_prompt[:64],
+            )
+
+        turn_id = payload.client_turn_id or f"turn_{secrets.token_hex(8)}"
+
+        # Check existing turn in DB for foreign vault isolation
+        db_turn = db.get_chat_turn(turn_id)
+        if db_turn and db_turn.get("vault_id") != vault_id:
+            raise HTTPException(status_code=404, detail="Turn not found")
+
+        if not db_turn:
+            db.create_chat_turn(
+                turn_id=turn_id,
+                thread_id=thread_id,
+                tenant_id=tenant_id,
+                vault_id=vault_id,
+                prompt=payload.effective_prompt,
+                client_turn_id=payload.client_turn_id,
+                client_context=payload.client_context,
+            )
+
+        last_event_id = request.headers.get("Last-Event-ID")
+        start_seq = parse_last_event_id(last_event_id, turn_id)
+
+        # Check buffer expiration (HTTP 410 Gone)
+        if turn_manager.is_expired_turn(turn_id):
+            return JSONResponse(
+                status_code=410,
+                content={"error": "turn_replay_buffer_expired", "message": "Turn replay buffer has expired"},
+            )
+
+        buf = turn_manager.get(turn_id)
+        if buf is None:
+            buf = turn_manager.get_or_create(turn_id, thread_id)
+            # Run reasoning agent
+            agent = GeminiChatAgent(db=db, api_key=settings.gemini_key, model=settings.gemini_model)
+            await agent.execute_turn(
+                buffer=buf,
+                prompt=payload.effective_prompt,
+                vault_id=vault_id,
+                user_id=user_id,
+                client_context=payload.client_context,
+            )
+
+        async def event_generator() -> AsyncGenerator[str, None]:
+            # Replay all events after start_seq
+            events = buf.get_events_after(start_seq)
+            for ev in events:
+                yield ev.raw_frame
+                await asyncio.sleep(0.001)
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream; charset=utf-8",
+            headers=SSE_HEADERS,
+        )
+
+    @app.post("/chat/threads/{thread_id}/turns/{turn_id}/cancel", response_model=ChatTurnCancelResponse, tags=["Chat"])
+    def cancel_chat_turn_endpoint(
+        thread_id: str,
+        turn_id: str,
+        auth: dict = Depends(authenticate_tenancy),
+    ):
+        vault_id = auth.get("vault_id") or "vlt_default"
+        thread = db.get_chat_thread(thread_id)
+        if thread and thread["vault_id"] != vault_id:
+            raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
+
+        turn_manager.cancel(turn_id)
+        cancelled_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        try:
+            db.update_chat_turn_status(turn_id, "cancelled")
+        except Exception:
+            pass
+
+        return {
+            "thread_id": thread_id,
+            "turn_id": turn_id,
+            "status": "cancelled",
+            "cancelled_at": cancelled_at,
+        }
+
+    # -------------------------------------------------------------------------
+    # Milestone M4: Processing Chains (Feature F4.4, P1 Timeline Clipping)
+    # -------------------------------------------------------------------------
+    @app.get("/processing-chains", response_model=ProcessingChainsResponse, tags=["Sync"])
+    def list_processing_chains_endpoint(
+        status: str | None = None,
+        since: str | None = None,
+        session_id: str | None = None,
+        recording_id: str | None = None,
+        limit: int = Query(50, ge=1, le=200),
+        auth: dict = Depends(authenticate_tenancy),
+    ):
+        vault_id = auth.get("vault_id") or "vlt_default"
+        return get_processing_chains_response(
+            db=db,
+            vault_id=vault_id,
+            status=status,
+            since=since,
+            session_id=session_id,
+            recording_id=recording_id,
+            limit=limit,
+        )
+
+    @app.get("/processing-chains/{chain_id}", response_model=ProcessingChainDto, tags=["Sync"])
+    def get_processing_chain_endpoint(
+        chain_id: str,
+        auth: dict = Depends(authenticate_tenancy),
+    ):
+        vault_id = auth.get("vault_id") or "vlt_default"
+        chain = db.get_processing_chain(chain_id)
+        if not chain or chain["vault_id"] != vault_id:
+            raise HTTPException(status_code=404, detail="Processing chain not found")
+        return ProcessingChainDto(
+            chain_id=chain["chain_id"],
+            recording_id=chain["recording_id"],
+            live_session_id=chain.get("live_session_id"),
+            status=chain["status"],
+            current_step=chain["current_step"],
+            progress_pct=float(chain.get("progress_pct") or 0.0),
+            error_code=chain.get("error_code"),
+            error_message=chain.get("error_message"),
+            analyzing_start_at=chain["analyzing_start_at"],
+            analyzing_end_at=chain.get("analyzing_end_at"),
+            started_at=chain.get("analyzing_start_at"),
+            updated_at=chain["updated_at"],
+        )
+
+    # -------------------------------------------------------------------------
+    # Milestone M4: Recording Mutations (Feature F4.4, Causal Cursor Ordering)
+    # -------------------------------------------------------------------------
+    @app.get("/recording-mutations", response_model=RecordingMutationsResponse, tags=["Sync"])
+    def list_recording_mutations_endpoint(
+        cursor: int = Query(0, ge=0),
+        after: int | None = Query(None, ge=0),
+        limit: int = Query(50, ge=1, le=1000),
+        mutation_type: str | None = None,
+        auth: dict = Depends(authenticate_tenancy),
+    ):
+        vault_id = auth.get("vault_id") or "vlt_default"
+        effective_cursor = after if after is not None else cursor
+        return get_recording_mutations_response(
+            db=db,
+            vault_id=vault_id,
+            cursor=effective_cursor,
+            limit=limit,
+            mutation_type=mutation_type,
+        )
+
+    @app.post("/recording-mutations", response_model=ClientRecordingMutationsResponse, tags=["Sync"])
+    def record_mutations_endpoint(
+        body: ClientRecordingMutationsRequest,
+        auth: dict = Depends(authenticate_tenancy),
+    ):
+        vault_id = auth.get("vault_id") or "vlt_default"
+        tenant_id = auth.get("tenant_id") or "ten_default"
+        return record_client_mutations(
+            db=db,
+            tenant_id=tenant_id,
+            vault_id=vault_id,
+            mutations=body.mutations,
+        )
 
     app.include_router(router)
 

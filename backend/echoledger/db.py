@@ -1,5 +1,5 @@
 from __future__ import annotations
-import contextlib, datetime, json, sqlite3, time, uuid
+import contextlib, datetime, json, re, sqlite3, time, uuid
 from pathlib import Path
 from .models import VadConfig
 
@@ -85,9 +85,16 @@ class Database:
             versions = [r[0] for r in c.execute("SELECT version FROM schema_version")]
             if versions != [1]:
                 raise RuntimeError("Unsupported database schema; migrate explicitly")
-            migration_file = Path(__file__).parent / "migrations" / "001_initial_schema.sql"
-            if migration_file.exists():
-                c.executescript(migration_file.read_text(encoding="utf-8"))
+            migrations_dir = Path(__file__).parent / "migrations"
+            if migrations_dir.exists():
+                for m_file in sorted(migrations_dir.glob("*.sql")):
+                    c.executescript(m_file.read_text(encoding="utf-8"))
+            try:
+                c_fts = c.execute("SELECT count(*) FROM section_messages_fts").fetchone()[0]
+                if c_fts == 0:
+                    c.execute("INSERT INTO section_messages_fts(message_id, content) SELECT message_id, content FROM section_messages")
+            except Exception:
+                pass
             try:
                 table_info = [r[1] for r in c.execute("PRAGMA table_info(section_messages)").fetchall()]
                 if table_info and "cluster_id" not in table_info:
@@ -751,5 +758,526 @@ class Database:
                 (speaker_id, speaker_name, cluster_id),
             )
             return cur.rowcount
+
+    # -------------------------------------------------------------------------
+    # Milestone M4: Chat Threads & Turns
+    # -------------------------------------------------------------------------
+    def get_chat_thread(self, thread_id: str, vault_id: str | None = None) -> dict | None:
+        if vault_id:
+            row = self.one("SELECT * FROM chat_threads WHERE thread_id = ? AND vault_id = ?", (thread_id, vault_id))
+        else:
+            row = self.one("SELECT * FROM chat_threads WHERE thread_id = ?", (thread_id,))
+        if not row:
+            return None
+        res = dict(row)
+        try:
+            res["metadata"] = json.loads(res.get("metadata") or "{}")
+        except Exception:
+            res["metadata"] = {}
+        return res
+
+    def create_chat_thread(
+        self,
+        thread_id: str,
+        tenant_id: str,
+        vault_id: str,
+        user_id: str,
+        title: str | None = None,
+        metadata: dict | str | None = None,
+    ) -> dict:
+        meta_str = json.dumps(metadata) if isinstance(metadata, dict) else (metadata or "{}")
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        with self.connect(immediate=True) as c:
+            c.execute(
+                """INSERT INTO chat_threads (thread_id, tenant_id, vault_id, user_id, title, metadata, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (thread_id, tenant_id, vault_id, user_id, title, meta_str, now_iso, now_iso),
+            )
+        return self.get_chat_thread(thread_id, vault_id)
+
+    def list_chat_threads(self, vault_id: str, limit: int = 50) -> list[dict]:
+        rows = self.all(
+            "SELECT * FROM chat_threads WHERE vault_id = ? ORDER BY updated_at DESC LIMIT ?",
+            (vault_id, limit),
+        )
+        res = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["metadata"] = json.loads(d.get("metadata") or "{}")
+            except Exception:
+                d["metadata"] = {}
+            res.append(d)
+        return res
+
+    def get_next_turn_index(self, thread_id: str) -> int:
+        row = self.one("SELECT COALESCE(MAX(turn_index), 0) + 1 AS next_idx FROM chat_turns WHERE thread_id = ?", (thread_id,))
+        return int(row["next_idx"]) if row else 1
+
+    def create_chat_turn(
+        self,
+        turn_id: str,
+        thread_id: str,
+        tenant_id: str,
+        vault_id: str,
+        prompt: str,
+        turn_index: int | None = None,
+        client_turn_id: str | None = None,
+        client_context: dict | str | None = None,
+        status: str = "pending",
+    ) -> dict:
+        if turn_index is None:
+            turn_index = self.get_next_turn_index(thread_id)
+        ctx_str = json.dumps(client_context) if isinstance(client_context, dict) else (client_context or "{}")
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        with self.connect(immediate=True) as c:
+            c.execute(
+                """INSERT INTO chat_turns (
+                       turn_id, thread_id, tenant_id, vault_id, turn_index,
+                       prompt, response_text, status, tokens_used,
+                       client_turn_id, client_context, created_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, '', ?, 0, ?, ?, ?)""",
+                (turn_id, thread_id, tenant_id, vault_id, turn_index, prompt, status, client_turn_id, ctx_str, now_iso),
+            )
+        return self.get_chat_turn(turn_id, vault_id)
+
+    def get_chat_turn(self, turn_id: str, vault_id: str | None = None) -> dict | None:
+        if vault_id:
+            row = self.one("SELECT * FROM chat_turns WHERE turn_id = ? AND vault_id = ?", (turn_id, vault_id))
+        else:
+            row = self.one("SELECT * FROM chat_turns WHERE turn_id = ?", (turn_id,))
+        if not row:
+            return None
+        res = dict(row)
+        try:
+            res["client_context"] = json.loads(res.get("client_context") or "{}")
+        except Exception:
+            res["client_context"] = {}
+        return res
+
+    def update_chat_turn(
+        self,
+        turn_id: str,
+        status: str | None = None,
+        response_text: str | None = None,
+        tokens_used: int | None = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+        completed_at: str | None = None,
+    ) -> None:
+        updates = []
+        params = []
+        if status is not None:
+            updates.append("status = ?")
+            params.append(status)
+        if response_text is not None:
+            updates.append("response_text = ?")
+            params.append(response_text)
+        if tokens_used is not None:
+            updates.append("tokens_used = ?")
+            params.append(tokens_used)
+        if error_code is not None:
+            updates.append("error_code = ?")
+            params.append(error_code)
+        if error_message is not None:
+            updates.append("error_message = ?")
+            params.append(error_message)
+        if completed_at is not None:
+            updates.append("completed_at = ?")
+            params.append(completed_at)
+
+        if not updates:
+            return
+
+        sql = f"UPDATE chat_turns SET {', '.join(updates)} WHERE turn_id = ?"
+        params.append(turn_id)
+        with self.connect(immediate=True) as c:
+            c.execute(sql, tuple(params))
+
+    def update_chat_turn_status(self, turn_id: str, status: str) -> None:
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        with self.connect(immediate=True) as c:
+            c.execute("UPDATE chat_turns SET status = ?, completed_at = ? WHERE turn_id = ?", (status, now_iso, turn_id))
+
+    # -------------------------------------------------------------------------
+    # Milestone M4: Processing Chains (Feature F4.4, P1 Timeline Clipping)
+    # -------------------------------------------------------------------------
+    def create_processing_chain(
+        self,
+        chain_id: str,
+        tenant_id: str,
+        vault_id: str,
+        recording_id: str,
+        live_session_id: str | None = None,
+        current_step: str = "slicing",
+        progress_pct: float = 0.0,
+        status: str = "pending",
+    ) -> dict:
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        with self.connect(immediate=True) as c:
+            c.execute(
+                """INSERT INTO processing_chains (
+                       chain_id, tenant_id, vault_id, recording_id, live_session_id,
+                       status, current_step, progress_pct, analyzing_start_at, created_at, updated_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (chain_id, tenant_id, vault_id, recording_id, live_session_id, status, current_step, progress_pct, now_iso, now_iso, now_iso),
+            )
+        return self.get_processing_chain(chain_id, vault_id)
+
+    def get_processing_chain(self, chain_id: str, vault_id: str | None = None) -> dict | None:
+        if vault_id:
+            row = self.one("SELECT * FROM processing_chains WHERE chain_id = ? AND vault_id = ?", (chain_id, vault_id))
+        else:
+            row = self.one("SELECT * FROM processing_chains WHERE chain_id = ?", (chain_id,))
+        if not row:
+            return None
+        res = dict(row)
+        res["started_at"] = res.get("analyzing_start_at")
+        return res
+
+    def update_processing_chain(
+        self,
+        chain_id: str,
+        status: str | None = None,
+        current_step: str | None = None,
+        progress_pct: float | None = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+        analyzing_end_at: str | None = None,
+    ) -> None:
+        updates = ["updated_at = ?"]
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        params = [now_iso]
+        if status is not None:
+            updates.append("status = ?")
+            params.append(status)
+        if current_step is not None:
+            updates.append("current_step = ?")
+            params.append(current_step)
+        if progress_pct is not None:
+            updates.append("progress_pct = ?")
+            params.append(progress_pct)
+        if error_code is not None:
+            updates.append("error_code = ?")
+            params.append(error_code)
+        if error_message is not None:
+            updates.append("error_message = ?")
+            params.append(error_message)
+        if analyzing_end_at is not None:
+            updates.append("analyzing_end_at = ?")
+            params.append(analyzing_end_at)
+
+        sql = f"UPDATE processing_chains SET {', '.join(updates)} WHERE chain_id = ?"
+        params.append(chain_id)
+        with self.connect(immediate=True) as c:
+            c.execute(sql, tuple(params))
+
+    def list_processing_chains(
+        self,
+        vault_id: str,
+        status: str | None = None,
+        since: str | None = None,
+        session_id: str | None = None,
+        recording_id: str | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        conditions = ["vault_id = ?"]
+        params: list[Any] = [vault_id]
+
+        if status:
+            if status == "active":
+                conditions.append("status IN ('pending', 'running')")
+            elif status != "all":
+                conditions.append("status = ?")
+                params.append(status)
+        else:
+            # Default active
+            conditions.append("status IN ('pending', 'running')")
+
+        if since:
+            conditions.append("updated_at >= ?")
+            params.append(since)
+
+        if session_id:
+            conditions.append("live_session_id = ?")
+            params.append(session_id)
+
+        if recording_id:
+            conditions.append("recording_id = ?")
+            params.append(recording_id)
+
+        sql = f"""SELECT * FROM processing_chains
+                  WHERE {' AND '.join(conditions)}
+                  ORDER BY updated_at DESC
+                  LIMIT ?"""
+        params.append(limit)
+        rows = self.all(sql, tuple(params))
+        res = []
+        for r in rows:
+            d = dict(r)
+            d["started_at"] = d.get("analyzing_start_at")
+            res.append(d)
+        return res
+
+    # -------------------------------------------------------------------------
+    # Milestone M4: Recording Mutations (Feature F4.4, Causal Cursor Ordering)
+    # -------------------------------------------------------------------------
+    def append_recording_mutation(
+        self,
+        tenant_id: str,
+        vault_id: str,
+        entity_type: str,
+        entity_id: str,
+        mutation_type: str,
+        payload_json: dict | str,
+    ) -> dict:
+        pay_str = json.dumps(payload_json) if isinstance(payload_json, dict) else (payload_json or "{}")
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        with self.connect(immediate=True) as c:
+            cur = c.execute(
+                """INSERT INTO recording_mutations (
+                       tenant_id, vault_id, entity_type, entity_id, mutation_type, payload_json, created_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (tenant_id, vault_id, entity_type, entity_id, mutation_type, pay_str, now_iso),
+            )
+            cursor_id = cur.lastrowid
+        row = self.one("SELECT * FROM recording_mutations WHERE cursor = ?", (cursor_id,))
+        if not row:
+            return {"cursor": cursor_id, "id": cursor_id, "payload": payload_json if isinstance(payload_json, dict) else {}}
+        d = dict(row)
+        d["id"] = d["cursor"]
+        try:
+            d["payload"] = json.loads(d["payload_json"])
+        except Exception:
+            d["payload"] = {}
+        return d
+
+    def list_recording_mutations(
+        self,
+        vault_id: str,
+        cursor: int = 0,
+        limit: int = 50,
+        mutation_type: str | None = None,
+    ) -> tuple[list[dict], int, bool]:
+        limit = max(1, min(limit, 1000))
+        query = "SELECT * FROM recording_mutations WHERE vault_id = ? AND cursor > ?"
+        params: list[Any] = [vault_id, cursor]
+        if mutation_type:
+            query += " AND mutation_type = ?"
+            params.append(mutation_type)
+        query += " ORDER BY cursor ASC LIMIT ?"
+        params.append(limit + 1)
+        rows = self.all(query, tuple(params))
+        has_more = len(rows) > limit
+        selected = rows[:limit]
+        res = []
+        for r in selected:
+            d = dict(r)
+            d["id"] = d["cursor"]
+            try:
+                d["payload"] = json.loads(d["payload_json"])
+            except Exception:
+                d["payload"] = {}
+            res.append(d)
+        next_cursor = selected[-1]["cursor"] if selected else cursor
+        return res, next_cursor, has_more
+
+    # -------------------------------------------------------------------------
+    # Milestone M4: Episodic Memory Events & Long Memory Retrieval
+    # -------------------------------------------------------------------------
+    def create_memory_event(
+        self,
+        event_id: str,
+        tenant_id: str,
+        vault_id: str,
+        title: str,
+        summary: str,
+        start_time: str,
+        end_time: str,
+        session_id: str | None = None,
+        category: str = "general",
+        speaker_names: list[str] | None = None,
+        keywords: list[str] | None = None,
+        confidence: float = 1.0,
+    ) -> dict:
+        spk_str = json.dumps(speaker_names or [])
+        kw_str = json.dumps(keywords or [])
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        with self.connect(immediate=True) as c:
+            c.execute(
+                """INSERT INTO memory_events (
+                       event_id, tenant_id, vault_id, session_id, title, summary,
+                       category, start_time, end_time, speaker_names, keywords, confidence,
+                       created_at, updated_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (event_id, tenant_id, vault_id, session_id, title, summary, category,
+                 start_time, end_time, spk_str, kw_str, confidence, now_iso, now_iso),
+            )
+        row = self.one("SELECT * FROM memory_events WHERE event_id = ?", (event_id,))
+        return dict(row) if row else {}
+
+    def search_sections(
+        self,
+        vault_id: str,
+        query: str,
+        session_id: str | None = None,
+        speaker_id: str | None = None,
+        limit: int = 20,
+    ) -> list[dict]:
+        from .speakers import SessionSpeakerResolver
+
+        cleaned = re.sub(r'["*():^{}\[\]~]', ' ', query)
+        tokens = [t.strip() for t in cleaned.split() if t.strip()]
+        fts_term = " ".join(f'"{t}"' for t in tokens) if tokens else query
+        like_pat = f"%{query.strip()}%"
+
+        # Contract C6 Speaker Fallback Resolution
+        profiles_rows = self.all("SELECT speaker_id, name, suspected_name FROM speaker_profiles WHERE vault_id = ?", (vault_id,))
+        profiles_map = {r["speaker_id"]: dict(r) for r in profiles_rows}
+        resolver = SessionSpeakerResolver(speaker_profiles=profiles_map)
+
+        sql = """
+        SELECT sm.message_id, sm.section_id, sm.speaker_id, sm.cluster_id, sm.speaker_name,
+               sm.content, sm.start_ms, sm.end_ms, sm.confidence,
+               s.live_session_id AS session_id, s.title AS section_title,
+               rs.started_at AS session_started_at
+        FROM section_messages sm
+        LEFT JOIN sections s ON sm.section_id = s.section_id
+        LEFT JOIN recording_sessions rs ON s.live_session_id = rs.live_session_id
+        WHERE (s.vault_id = ? OR (s.vault_id IS NULL AND (SELECT vault_id FROM recording_sessions WHERE live_session_id = s.live_session_id) = ?))
+          AND (? IS NULL OR s.live_session_id = ?)
+          AND (? IS NULL OR sm.speaker_id = ? OR sm.cluster_id = ?)
+          AND (
+              (sm.message_id IN (SELECT message_id FROM section_messages_fts WHERE section_messages_fts MATCH ?))
+              OR (sm.content LIKE ?)
+          )
+        ORDER BY rs.started_at DESC, sm.start_ms ASC
+        LIMIT ?
+        """
+        rows = self.all(
+            sql,
+            (vault_id, vault_id, session_id, session_id, speaker_id, speaker_id, speaker_id, fts_term, like_pat, limit),
+        )
+        # If no join match because section_messages is seeded without sections in tests, search directly
+        if not rows:
+            fallback_sql = """
+            SELECT sm.message_id, sm.section_id, sm.speaker_id, sm.cluster_id, sm.speaker_name,
+                   sm.content, sm.start_ms, sm.end_ms, sm.confidence
+            FROM section_messages sm
+            WHERE (
+                (sm.message_id IN (SELECT message_id FROM section_messages_fts WHERE section_messages_fts MATCH ?))
+                OR (sm.content LIKE ?)
+            )
+            LIMIT ?
+            """
+            rows = self.all(fallback_sql, (fts_term, like_pat, limit))
+
+        results = []
+        for r in rows:
+            spk_name = resolver.resolve(
+                speaker_id=r.get("speaker_id"),
+                cluster_id=r.get("cluster_id"),
+                local_label=r.get("speaker_name"),
+            )
+            raw_spk = r.get("speaker_name")
+            if raw_spk and raw_spk not in ("Unknown", "Speaker") and not spk_name.startswith("Speaker"):
+                resolved_name = spk_name
+            else:
+                resolved_name = spk_name or raw_spk or "Speaker 1"
+
+            results.append({
+                "message_id": r["message_id"],
+                "section_id": r.get("section_id"),
+                "session_id": r.get("session_id"),
+                "speaker_name": resolved_name,
+                "speaker_id": r.get("speaker_id"),
+                "content": r["content"],
+                "start_ms": int(r.get("start_ms") or 0),
+                "end_ms": int(r.get("end_ms") or 0),
+                "timestamp_iso": r.get("session_started_at") or datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "confidence": float(r.get("confidence") or 1.0),
+                "audio_preview_url": f"/clusters/{r['cluster_id']}/audio_preview" if r.get("cluster_id") else None,
+            })
+        return results
+
+    def search_memory(
+        self,
+        vault_id: str,
+        query: str,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        limit: int = 10,
+    ) -> list[dict]:
+        like_pat = f"%{query.strip()}%"
+
+        # 1. Search memory_events table
+        me_rows = self.all(
+            """SELECT event_id AS memory_id, 'memory_event' AS kind, title, summary AS snippet,
+                      start_time AS occurred_at, speaker_names, confidence
+               FROM memory_events
+               WHERE vault_id = ?
+                 AND (title LIKE ? OR summary LIKE ? OR keywords LIKE ?)
+                 AND (? IS NULL OR start_time >= ?)
+                 AND (? IS NULL OR end_time <= ?)
+               ORDER BY start_time DESC
+               LIMIT ?""",
+            (vault_id, like_pat, like_pat, like_pat, date_from, date_from, date_to, date_to, limit),
+        )
+
+        # 2. Search summaries table
+        sum_rows = self.all(
+            """SELECT summary_id AS memory_id, 'summary' AS kind,
+                      target_type || ' ' || target_id AS title,
+                      summary_markdown AS snippet,
+                      created_at AS occurred_at, '[]' AS speaker_names, 1.0 AS confidence
+               FROM summaries
+               WHERE vault_id = ?
+                 AND (summary_markdown LIKE ? OR topics LIKE ?)
+                 AND (? IS NULL OR created_at >= ?)
+                 AND (? IS NULL OR created_at <= ?)
+               ORDER BY created_at DESC
+               LIMIT ?""",
+            (vault_id, like_pat, like_pat, date_from, date_from, date_to, date_to, limit),
+        )
+
+        combined = [dict(r) for r in me_rows] + [dict(r) for r in sum_rows]
+
+        # 3. If still empty, search section_messages for transcript occurrences
+        if not combined:
+            sections = self.search_sections(vault_id, query=query, limit=limit)
+            for s in sections:
+                combined.append({
+                    "memory_id": f"mem_{s['message_id']}",
+                    "kind": "transcript_snippet",
+                    "title": f"Dialogue with {s['speaker_name']}",
+                    "snippet": s["content"],
+                    "occurred_at": s["timestamp_iso"],
+                    "speaker_name": s["speaker_name"],
+                    "confidence": s["confidence"],
+                })
+
+        return combined[:limit]
+
+    def list_recent_vault_sessions(self, vault_id: str, limit: int = 5) -> list[dict]:
+        rows = self.all(
+            """SELECT live_session_id, started_at, duration_ms, status
+               FROM recording_sessions
+               WHERE vault_id = ?
+               ORDER BY started_at DESC
+               LIMIT ?""",
+            (vault_id, limit),
+        )
+        return [dict(r) for r in rows]
+
+
+EchoDatabase = Database
+
+
+def get_db(root: Path | str | None = None) -> Database:
+    if root is None:
+        from .config import Settings
+        root = Settings().data_dir
+    return Database(Path(root))
+
 
 

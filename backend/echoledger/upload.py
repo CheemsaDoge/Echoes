@@ -442,6 +442,43 @@ class UploadService:
                 ) from err
             raise
 
+        # Create processing chain (Feature F4.4, P1 Timeline Clipping)
+        chain_id = f"chn_{seg_id.removeprefix('seg_')}"
+        try:
+            self.db.create_processing_chain(
+                chain_id=chain_id,
+                tenant_id=tenant_id,
+                vault_id=vault_id,
+                recording_id=rec_id,
+                live_session_id=session_id,
+                current_step="slicing",
+                progress_pct=10.0,
+                status="pending",
+            )
+        except Exception:
+            pass
+
+        # Record segment_uploaded mutation for cursor synchronization
+        try:
+            self.db.append_recording_mutation(
+                tenant_id=tenant_id,
+                vault_id=vault_id,
+                entity_type="segment",
+                entity_id=seg_id,
+                mutation_type="segment_uploaded",
+                payload_json={
+                    "recording_id": rec_id,
+                    "live_session_id": session_id,
+                    "segment_id": seg_id,
+                    "storage_key": storage_key,
+                    "duration_ms": adts_meta.duration_ms,
+                    "file_size_bytes": adts_meta.file_size_bytes,
+                    "split_reason": metadata.get("split_reason", "window"),
+                },
+            )
+        except Exception:
+            pass
+
         return UploadRecordingResponse(
             recording_id=rec_id,
             asset_id=asset_id,

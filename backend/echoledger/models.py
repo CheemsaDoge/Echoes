@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Literal
+from typing import Literal, Any
 from pydantic import BaseModel, Field, ConfigDict, model_validator, field_validator, computed_field
 
 class StrictModel(BaseModel):
@@ -539,5 +539,143 @@ class ClusterPatchResponse(StrictModel):
     cluster_id: str
     status: str
     speaker_id: str | None = None
+
+
+# =============================================================================
+# Milestone M4: Chat, Processing Chains & Mutations Models
+# =============================================================================
+
+class ChatTurnCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    message: str | None = None
+    prompt: str | None = None
+    client_turn_id: str | None = None
+    client_context: dict[str, Any] | None = None
+    active_memory_window: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def validate_content(self):
+        text = (self.message or self.prompt or "").strip()
+        if not text:
+            raise ValueError("Either 'message' or 'prompt' must be provided and non-empty")
+        return self
+
+    @property
+    def effective_prompt(self) -> str:
+        return (self.message or self.prompt or "").strip()
+
+
+class ChatTurnCancelResponse(StrictModel):
+    thread_id: str
+    turn_id: str
+    status: Literal["cancelled"] = "cancelled"
+    cancelled_at: str
+
+
+class ChatThreadCreateRequest(StrictModel):
+    thread_id: str | None = None
+    title: str | None = None
+    metadata: dict[str, Any] | None = None
+
+
+class ChatThreadDto(StrictModel):
+    thread_id: str
+    tenant_id: str
+    vault_id: str
+    user_id: str
+    title: str | None = None
+    metadata: dict[str, Any] | None = None
+    created_at: str
+    updated_at: str
+
+
+class ChatTurnDto(StrictModel):
+    turn_id: str
+    thread_id: str
+    tenant_id: str
+    vault_id: str
+    turn_index: int
+    prompt: str
+    response_text: str
+    status: str
+    tokens_used: int
+    client_turn_id: str | None = None
+    created_at: str
+    completed_at: str | None = None
+
+
+ProcessingChainStatus = Literal["pending", "running", "completed", "failed"]
+ProcessingChainStep = Literal["slicing", "vad", "transcribing", "diarizing", "summarizing"]
+
+
+class ProcessingChainDto(StrictModel):
+    chain_id: str
+    recording_id: str
+    live_session_id: str | None = None
+    status: ProcessingChainStatus
+    current_step: ProcessingChainStep
+    progress_pct: float = Field(ge=0.0, le=100.0)
+    error_code: str | None = None
+    error_message: str | None = None
+    analyzing_start_at: str
+    analyzing_end_at: str | None = None
+    started_at: str | None = None
+    updated_at: str
+
+
+class ProcessingChainsResponse(StrictModel):
+    chains: list[ProcessingChainDto]
+    total: int
+    server_time: str
+
+
+RecordingMutationType = Literal[
+    "segment_uploaded",
+    "segment_transcribed",
+    "cluster_updated",
+    "speaker_renamed",
+    "event_created",
+    "redact_audio",
+    "retention_updated",
+]
+
+
+class RecordingMutationDto(StrictModel):
+    cursor: int
+    id: int | None = None
+    tenant_id: str
+    vault_id: str
+    entity_type: str
+    entity_id: str
+    mutation_type: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+    payload_json: str | None = None
+    created_at: str
+
+
+class RecordingMutationsResponse(StrictModel):
+    mutations: list[RecordingMutationDto]
+    next_cursor: int
+    has_more: bool
+
+
+class ClientMutationAction(StrictModel):
+    mutation_id: str | None = None
+    live_session_id: str | None = None
+    action: str
+    start_ms: int = Field(default=0, ge=0)
+    end_ms: int = Field(default=0, ge=0)
+    delete_audio: bool = True
+    retain_transcript: bool = False
+
+
+class ClientRecordingMutationsRequest(StrictModel):
+    mutations: list[dict[str, Any]] | list[ClientMutationAction] = Field(min_length=1)
+
+
+class ClientRecordingMutationsResponse(StrictModel):
+    status: Literal["synced"] = "synced"
+    processed_count: int
+
 
 

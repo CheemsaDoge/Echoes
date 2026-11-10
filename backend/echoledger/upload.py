@@ -9,6 +9,7 @@ import datetime
 import hashlib
 import json
 import secrets
+import sqlite3
 from dataclasses import dataclass
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -199,17 +200,48 @@ class UploadService:
                 detail=f"capture_metadata must be valid JSON: {exc}",
             ) from exc
 
+        try:
+            segment_index = int(metadata.get("segment_index", 0))
+        except (ValueError, TypeError) as ex:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Invalid segment_index in capture_metadata: must be integer ({ex})",
+            ) from ex
+        if segment_index < 0:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="segment_index in capture_metadata must be non-negative",
+            )
+
         # 2. Timing & Clock drift verification
         seg_dt = UploadLeaseValidator.validate_segment_time(started_at)
 
         # 3. Resolve uploading device profile ID
-        uploading_dp_id = (
-            uploading_dp_id_header
-            or metadata.get("dp_instance_id")
-            or metadata.get("device_id")
-            or (auth_context.get("dp_instance_id") if auth_context else None)
-        )
         user_id = auth_context.get("user_id") if auth_context else None
+        effective_user_id = user_id or "usr_default"
+
+        if auth_context and not auth_context.get("is_admin") and auth_context.get("dp_instance_id"):
+            bound_dp = auth_context["dp_instance_id"]
+            if uploading_dp_id_header and uploading_dp_id_header != bound_dp:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Header x-dp-instance-id does not match authenticated binding",
+                )
+            meta_dp = metadata.get("dp_instance_id") or metadata.get("device_id")
+            if meta_dp and meta_dp != bound_dp:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="capture_metadata device ID does not match authenticated binding",
+                )
+            uploading_dp_id = bound_dp
+        else:
+            uploading_dp_id = (
+                uploading_dp_id_header
+                or metadata.get("dp_instance_id")
+                or metadata.get("device_id")
+                or (auth_context.get("dp_instance_id") if auth_context else None)
+            )
+        effective_dp_id = uploading_dp_id or "dp_default"
 
         # 4. Enforce Primary Device Lease & Listening Schedule Window
         with self.db.connect() as conn:
@@ -258,11 +290,28 @@ class UploadService:
             or metadata.get("session_id")
             or f"sess_{seg_dt.strftime('%Y%m%d_%H%M%S')}"
         )
-        segment_index = int(metadata.get("segment_index", 0))
+
+        existing_sess = self.db.one(
+            "SELECT * FROM recording_sessions WHERE live_session_id=?",
+            (session_id,),
+        )
+        if existing_sess:
+            sess_dict = dict(existing_sess)
+            if (
+                sess_dict["tenant_id"] != tenant_id
+                or sess_dict["vault_id"] != vault_id
+                or (user_id is not None and sess_dict["user_id"] != user_id)
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Recording session belongs to a different tenant/vault/user",
+                )
+            if user_id is None:
+                effective_user_id = sess_dict["user_id"]
 
         existing_seg = self.db.one(
-            "SELECT * FROM recording_segments WHERE live_session_id=? AND segment_index=?",
-            (session_id, segment_index),
+            "SELECT * FROM recording_segments WHERE live_session_id=? AND segment_index=? AND tenant_id=? AND vault_id=?",
+            (session_id, segment_index, tenant_id, vault_id),
         )
         if existing_seg:
             existing_seg_dict = dict(existing_seg)
@@ -314,37 +363,70 @@ class UploadService:
                 resolved_tz = datetime.timezone.utc
         local_day_key = seg_dt.astimezone(resolved_tz).strftime("%Y-%m-%d")
 
-        effective_user_id = user_id or "usr_default"
         effective_dp_id = uploading_dp_id or "dp_default"
 
-        self.db.upsert_recording_session(
-            live_session_id=session_id,
-            tenant_id=tenant_id,
-            vault_id=vault_id,
-            user_id=effective_user_id,
-            dp_instance_id=effective_dp_id,
-            local_day_key=local_day_key,
-            started_at=started_at,
-        )
+        try:
+            self.db.upsert_recording_session(
+                live_session_id=session_id,
+                tenant_id=tenant_id,
+                vault_id=vault_id,
+                user_id=effective_user_id,
+                dp_instance_id=effective_dp_id,
+                local_day_key=local_day_key,
+                started_at=started_at,
+            )
+        except PermissionError as err:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=str(err),
+            ) from err
 
-        self.db.insert_recording_segment(
-            segment_id=seg_id,
-            live_session_id=session_id,
-            tenant_id=tenant_id,
-            vault_id=vault_id,
-            user_id=effective_user_id,
-            dp_instance_id=effective_dp_id,
-            segment_index=segment_index,
-            storage_key=storage_key,
-            started_at=started_at,
-            audio_format="aac",
-            sample_rate=adts_meta.sample_rate,
-            bitrate_kbps=adts_meta.bitrate_kbps,
-            duration_ms=adts_meta.duration_ms,
-            file_size_bytes=adts_meta.file_size_bytes,
-            split_reason=metadata.get("split_reason", "window"),
-            upload_status="uploaded",
-        )
+        try:
+            self.db.insert_recording_segment(
+                segment_id=seg_id,
+                live_session_id=session_id,
+                tenant_id=tenant_id,
+                vault_id=vault_id,
+                user_id=effective_user_id,
+                dp_instance_id=effective_dp_id,
+                segment_index=segment_index,
+                storage_key=storage_key,
+                started_at=started_at,
+                audio_format="aac",
+                sample_rate=adts_meta.sample_rate,
+                bitrate_kbps=adts_meta.bitrate_kbps,
+                duration_ms=adts_meta.duration_ms,
+                file_size_bytes=adts_meta.file_size_bytes,
+                split_reason=metadata.get("split_reason", "window"),
+                upload_status="uploaded",
+            )
+        except sqlite3.IntegrityError as err:
+            # Race condition on concurrent identical upload
+            existing_seg = self.db.one(
+                "SELECT * FROM recording_segments WHERE live_session_id=? AND segment_index=? AND tenant_id=? AND vault_id=?",
+                (session_id, segment_index, tenant_id, vault_id),
+            )
+            if existing_seg:
+                existing_seg_dict = dict(existing_seg)
+                rec_id = metadata.get("recording_id") or f"rec_{session_id}_{segment_index}"
+                token_part = existing_seg_dict["segment_id"].removeprefix("seg_")
+                return UploadRecordingResponse(
+                    recording_id=rec_id,
+                    asset_id=f"ast_{token_part}",
+                    artifact_id=f"art_{token_part}",
+                    storage_key=existing_seg_dict.get("storage_key") or "",
+                    status="queued_for_processing",
+                )
+            other_seg = self.db.one(
+                "SELECT * FROM recording_segments WHERE live_session_id=? AND segment_index=?",
+                (session_id, segment_index),
+            )
+            if other_seg:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Recording session belongs to a different tenant/vault/user",
+                ) from err
+            raise
 
         return UploadRecordingResponse(
             recording_id=rec_id,

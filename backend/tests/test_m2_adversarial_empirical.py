@@ -439,18 +439,17 @@ class TestIdempotencyAndConcurrencyDefects:
         assert body1["storage_key"] == body2["storage_key"]
         assert body1["asset_id"] == body2["asset_id"]
 
-    def test_concurrent_identical_uploads_defect_exposure(self, env):
+    def test_concurrent_identical_uploads_resolved_idempotent(self, env):
         """
-        DEFECT REPRODUCTION:
-        Concurrent uploads of the identical (live_session_id, segment_index) crash with
-        unhandled sqlite3.IntegrityError (HTTP 500) due to race condition between
-        pre-check SELECT and INSERT INTO recording_segments.
+        REMEDIATED BEHAVIOR:
+        Concurrent uploads of the identical (live_session_id, segment_index) all succeed
+        with HTTP 201 and return the identical idempotent receipt without crashing.
         """
         _, _, _, client, headers = env
         now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
         stream = make_adts_stream(5)
         meta = {
-            "live_session_id": "sess_concurrent_defect",
+            "live_session_id": "sess_concurrent_remediated",
             "segment_index": 0,
             "dp_instance_id": "dp_phone",
         }
@@ -466,26 +465,18 @@ class TestIdempotencyAndConcurrencyDefects:
             return client.post("/tenants/t_alpha/vaults/v_alpha_1/recordings/upload", data=data, files=files, headers=headers)
 
         # Launch 5 concurrent threads attempting upload
-        crashed = False
         with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
             futures = [executor.submit(upload_call) for _ in range(5)]
-            for f in futures:
-                try:
-                    res = f.result()
-                    if res.status_code != 201:
-                        crashed = True
-                except Exception as e:
-                    # Starlette TestClient raises the internal exception
-                    if isinstance(e, sqlite3.IntegrityError) or "UNIQUE constraint failed" in str(e):
-                        crashed = True
+            results = [f.result() for f in futures]
+            for res in results:
+                assert res.status_code == 201, f"Expected 201, got {res.status_code}: {res.text}"
+            asset_ids = {r.json()["asset_id"] for r in results}
+            assert len(asset_ids) == 1, "All concurrent uploads must resolve to identical asset receipt"
 
-        assert crashed, "Expected concurrent upload race condition defect to be reproduced!"
-
-    def test_non_integer_segment_index_defect_exposure(self, env):
+    def test_non_integer_segment_index_returns_422(self, env):
         """
-        DEFECT REPRODUCTION:
-        capture_metadata with non-integer segment_index (e.g. 'invalid_idx') causes
-        an unhandled ValueError in UploadService.handle_upload instead of returning HTTP 422.
+        REMEDIATED BEHAVIOR:
+        capture_metadata with non-integer segment_index returns HTTP 422 Unprocessable Content.
         """
         _, _, _, client, headers = env
         now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
@@ -503,6 +494,6 @@ class TestIdempotencyAndConcurrencyDefects:
         }
         files = {"file": ("chunk.aac", stream, "audio/aac")}
 
-        # TestClient raises unhandled ValueError from endpoint
-        with pytest.raises(ValueError, match="invalid literal for int"):
-            client.post("/tenants/t_alpha/vaults/v_alpha_1/recordings/upload", data=data, files=files, headers=headers)
+        res = client.post("/tenants/t_alpha/vaults/v_alpha_1/recordings/upload", data=data, files=files, headers=headers)
+        assert res.status_code == 422
+        assert "Invalid segment_index" in res.json().get("detail", "")

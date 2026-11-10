@@ -93,9 +93,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     raise HTTPException(status_code=403, detail="Header x-user-id does not match authenticated binding")
                 if h_tenant and h_tenant != binding["tenant_id"]:
                     raise HTTPException(status_code=403, detail="Header x-tenant-id does not match authenticated binding")
+                if h_dp and h_dp != binding["dp_instance_id"]:
+                    raise HTTPException(status_code=403, detail="Header x-dp-instance-id does not match authenticated binding")
                 user_id = binding["user_id"]
                 tenant_id = binding["tenant_id"]
-                dp_instance_id = dp_instance_id or binding["dp_instance_id"]
+                dp_instance_id = binding["dp_instance_id"]
             else:
                 user_row = db.one("SELECT * FROM users WHERE user_id=? OR email=?", (token, token))
                 if user_row:
@@ -212,7 +214,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if auth.get("vault_id") and auth["vault_id"] != eff_vault:
                 raise HTTPException(status_code=403, detail="Access denied: micro-isolation breach")
 
-        uploading_dp_id = request.headers.get("x-dp-instance-id")
+        uploading_dp_id = auth.get("dp_instance_id") or request.headers.get("x-dp-instance-id")
 
         return await upload_service.handle_upload(
             tenant_id=eff_tenant,

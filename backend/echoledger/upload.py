@@ -11,6 +11,7 @@ import json
 import secrets
 from dataclasses import dataclass
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException, UploadFile, status
 
@@ -177,14 +178,14 @@ class UploadService:
         # 1. Format validation
         if format_str != "aac":
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=422,
                 detail=f"Invalid format: expected 'aac', got '{format_str}'",
             )
 
         valid_sources = {"ambient", "phone", "watch", "app_default", "mic"}
         if source not in valid_sources:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=422,
                 detail=f"Invalid source: expected one of {sorted(valid_sources)}, got '{source}'",
             )
 
@@ -194,7 +195,7 @@ class UploadService:
                 raise ValueError("capture_metadata must be a JSON object")
         except Exception as exc:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=422,
                 detail=f"capture_metadata must be valid JSON: {exc}",
             ) from exc
 
@@ -229,8 +230,8 @@ class UploadService:
                 user_id=user_id,
             )
 
-        # 5. Read audio stream & enforce size limit
-        audio_bytes = await file.read()
+        # 5. Read audio stream with bounded limit to prevent memory exhaustion
+        audio_bytes = await file.read(self.max_upload_bytes + 1)
         if not audio_bytes:
             raise AudioBitstreamException(
                 error_code="empty_audio_file",
@@ -251,7 +252,7 @@ class UploadService:
                 message=f"Audio file is not a valid ADTS AAC stream: {err}",
             ) from err
 
-        # 7. Physical Partitioned Storage Persistence
+        # 7. Check for idempotent retry before storage/db write
         session_id = (
             metadata.get("live_session_id")
             or metadata.get("session_id")
@@ -259,6 +260,23 @@ class UploadService:
         )
         segment_index = int(metadata.get("segment_index", 0))
 
+        existing_seg = self.db.one(
+            "SELECT * FROM recording_segments WHERE live_session_id=? AND segment_index=?",
+            (session_id, segment_index),
+        )
+        if existing_seg:
+            existing_seg_dict = dict(existing_seg)
+            rec_id = metadata.get("recording_id") or f"rec_{session_id}_{segment_index}"
+            token_part = existing_seg_dict["segment_id"].removeprefix("seg_")
+            return UploadRecordingResponse(
+                recording_id=rec_id,
+                asset_id=f"ast_{token_part}",
+                artifact_id=f"art_{token_part}",
+                storage_key=existing_seg_dict.get("storage_key") or "",
+                status="queued_for_processing",
+            )
+
+        # 8. Physical Partitioned Storage Persistence
         enriched_meta = {
             **metadata,
             "sample_rate": adts_meta.sample_rate,
@@ -281,12 +299,20 @@ class UploadService:
             meta_dict=enriched_meta,
         )
 
-        # 8. Database Session & Segment Persistence
+        # 9. Database Session & Segment Persistence
         rec_id = metadata.get("recording_id") or f"rec_{secrets.token_hex(8)}"
-        seg_id = f"seg_{secrets.token_hex(8)}"
-        asset_id = f"ast_{secrets.token_hex(8)}"
-        artifact_id = f"art_{secrets.token_hex(8)}"
-        local_day_key = seg_dt.strftime("%Y-%m-%d")
+        seg_token = secrets.token_hex(8)
+        seg_id = f"seg_{seg_token}"
+        asset_id = f"ast_{seg_token}"
+        artifact_id = f"art_{seg_token}"
+
+        resolved_tz = datetime.timezone.utc
+        if capture_timezone:
+            try:
+                resolved_tz = ZoneInfo(capture_timezone)
+            except Exception:
+                resolved_tz = datetime.timezone.utc
+        local_day_key = seg_dt.astimezone(resolved_tz).strftime("%Y-%m-%d")
 
         effective_user_id = user_id or "usr_default"
         effective_dp_id = uploading_dp_id or "dp_default"

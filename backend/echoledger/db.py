@@ -299,6 +299,15 @@ class Database:
                     (live_session_id, tenant_id, vault_id, user_id, dp_instance_id, local_day_key, title, started_at, now_iso, now_iso),
                 )
             else:
+                existing_dict = dict(existing)
+                if (
+                    existing_dict["tenant_id"] != tenant_id
+                    or existing_dict["vault_id"] != vault_id
+                    or existing_dict["user_id"] != user_id
+                ):
+                    raise PermissionError(
+                        f"Recording session {live_session_id} belongs to a different tenant/vault/user"
+                    )
                 c.execute(
                     "UPDATE recording_sessions SET updated_at=? WHERE live_session_id=?",
                     (now_iso, live_session_id),

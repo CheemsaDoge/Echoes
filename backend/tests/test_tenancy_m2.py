@@ -495,3 +495,95 @@ def test_tenancy_endpoints_authorization(m2_env):
     # 3. Unauthenticated access forbidden (401)
     res_unauth = client.get("/tenants/t_alpha")
     assert res_unauth.status_code == 401
+
+
+# ============================================================================
+# 8. Hardening & Edge Cases (Remediations)
+# ============================================================================
+
+def test_session_cross_tenant_upsert_rejection(m2_env):
+    _, db, _, _, _ = m2_env
+    # Create legitimate session for u_alice
+    db.upsert_recording_session(
+        live_session_id="sess_hijack_target",
+        tenant_id="t_alpha",
+        vault_id="v_alpha_1",
+        user_id="u_alice",
+        dp_instance_id="dp_phone",
+        local_day_key="2026-11-10",
+        started_at="2026-11-10T00:00:00Z",
+    )
+
+    # Malicious actor from another tenant attempts to upsert session
+    with pytest.raises(PermissionError, match="belongs to a different tenant"):
+        db.upsert_recording_session(
+            live_session_id="sess_hijack_target",
+            tenant_id="t_beta",
+            vault_id="v_beta_1",
+            user_id="u_mallory",
+            dp_instance_id="dp_mallory",
+            local_day_key="2026-11-10",
+            started_at="2026-11-10T00:00:00Z",
+        )
+
+
+def test_upload_idempotency_returns_consistent_receipt(m2_env):
+    _, _, _, client, headers = m2_env
+    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+    audio = make_adts_stream(5)
+    files = {"file": ("chunk.aac", audio, "audio/aac")}
+    data = {
+        "started_at": now_iso,
+        "format": "aac",
+        "source": "phone",
+        "capture_metadata": json.dumps({
+            "live_session_id": "sess_idempotent_test",
+            "segment_index": 0,
+            "dp_instance_id": "dp_phone",
+        }),
+    }
+
+    # First upload
+    res1 = client.post("/tenants/t_alpha/vaults/v_alpha_1/recordings/upload", data=data, files=files, headers=headers)
+    assert res1.status_code == 201
+    body1 = res1.json()
+
+    # Second upload (retry) with fresh files handle
+    files_retry = {"file": ("chunk.aac", audio, "audio/aac")}
+    res2 = client.post("/tenants/t_alpha/vaults/v_alpha_1/recordings/upload", data=data, files=files_retry, headers=headers)
+    assert res2.status_code == 201
+    body2 = res2.json()
+
+    assert body1["storage_key"] == body2["storage_key"]
+    assert body1["asset_id"] == body2["asset_id"]
+
+
+def test_identity_spoofing_prevented_for_non_admin(m2_env):
+    _, db, _, client, _ = m2_env
+    # Seed a non-admin user and device binding
+    with db.connect(immediate=True) as conn:
+        conn.execute("INSERT OR IGNORE INTO users (user_id, tenant_id, email) VALUES ('u_bob', 't_alpha', 'bob@alpha.com')")
+        conn.execute("INSERT OR IGNORE INTO dp_instances (dp_instance_id, tenant_id, vault_id, user_id, dp_instance_name, device_kind) VALUES ('dp_bob', 't_alpha', 'v_alpha_1', 'u_bob', 'Bob Phone', 'phone')")
+        conn.execute(
+            """INSERT INTO device_bindings (binding_id, tenant_id, user_id, dp_instance_id, device_unique_identifier, os_name, push_token, status)
+               VALUES ('bind_bob', 't_alpha', 'u_bob', 'dp_bob', 'bob_uuid_123', 'android', 'token_bob_secret', 'bound')"""
+        )
+
+    # Legitimate non-admin token with matched headers succeeds
+    legit_headers = {
+        "Authorization": "Bearer token_bob_secret",
+        "x-tenant-id": "t_alpha",
+        "x-user-id": "u_bob",
+    }
+    res_ok = client.get("/tenants/t_alpha", headers=legit_headers)
+    assert res_ok.status_code == 200
+
+    # Spoofing attack: non-admin token with spoofed x-user-id header gets 403
+    spoofed_headers = {
+        "Authorization": "Bearer token_bob_secret",
+        "x-tenant-id": "t_alpha",
+        "x-user-id": "u_alice",  # Attempting to impersonate Alice
+    }
+    res_spoof = client.get("/tenants/t_alpha", headers=spoofed_headers)
+    assert res_spoof.status_code == 403
+

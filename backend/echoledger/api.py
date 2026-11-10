@@ -89,14 +89,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not is_admin:
             binding = db.one("SELECT * FROM device_bindings WHERE push_token=? OR binding_id=?", (token, token))
             if binding:
-                user_id = user_id or binding["user_id"]
-                tenant_id = tenant_id or binding["tenant_id"]
+                if h_user and h_user != binding["user_id"]:
+                    raise HTTPException(status_code=403, detail="Header x-user-id does not match authenticated binding")
+                if h_tenant and h_tenant != binding["tenant_id"]:
+                    raise HTTPException(status_code=403, detail="Header x-tenant-id does not match authenticated binding")
+                user_id = binding["user_id"]
+                tenant_id = binding["tenant_id"]
                 dp_instance_id = dp_instance_id or binding["dp_instance_id"]
             else:
                 user_row = db.one("SELECT * FROM users WHERE user_id=? OR email=?", (token, token))
                 if user_row:
-                    user_id = user_id or user_row["user_id"]
-                    tenant_id = tenant_id or user_row["tenant_id"]
+                    if h_user and h_user != user_row["user_id"]:
+                        raise HTTPException(status_code=403, detail="Header x-user-id does not match authenticated user")
+                    if h_tenant and h_tenant != user_row["tenant_id"]:
+                        raise HTTPException(status_code=403, detail="Header x-tenant-id does not match authenticated user")
+                    user_id = user_row["user_id"]
+                    tenant_id = user_row["tenant_id"]
 
             if not tenant_id and user_id:
                 u = db.get_user(user_id)

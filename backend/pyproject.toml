@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "echoledger"
-version = "0.1.1"
+version = "0.1.1.1"
 description = "Local-first personal audio journal backend"
 requires-python = ">=3.11"
 dependencies = [
@@ -28,6 +28,10 @@ echoledger-mcp = "echoledger.mcp_stdio:main"
 
 [tool.setuptools.packages.find]
 include = ["echoledger*"]
+
+[tool.setuptools.package-data]
+"echoledger.migrations" = ["*.sql"]
+
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

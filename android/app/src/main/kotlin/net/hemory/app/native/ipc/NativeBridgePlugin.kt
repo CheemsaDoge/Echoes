@@ -30,6 +30,7 @@ import java.io.File
 import java.io.FileOutputStream
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 
 class NativeBridgePlugin :
     FlutterPlugin,
@@ -73,6 +74,7 @@ class NativeBridgePlugin :
             token: String,
             baseUrl: String,
             rawPrefs: Map<String, String?>,
+            encryptedRefreshToken: String = "",
             nowEpochSeconds: Long = System.currentTimeMillis() / 1000L
         ): Map<String, Any>? {
             val cleanToken = token.trim()
@@ -81,7 +83,9 @@ class NativeBridgePlugin :
             val cleanBaseUrl = baseUrl.trim().trimEnd('/').ifEmpty { HemoryPreferences.DEFAULT_BASE_URL }
             val expiresAt = rawPrefs["expires_at"]?.trim()?.toLongOrNull()?.takeIf { it > 0L }
                 ?: (nowEpochSeconds + TEN_YEARS_SECONDS)
-            val refreshToken = rawPrefs["refresh_token"]?.trim()?.takeIf { it.isNotEmpty() } ?: cleanToken
+            val refreshToken = encryptedRefreshToken.trim().takeIf { it.isNotEmpty() }
+                ?: rawPrefs["refresh_token"]?.trim()?.takeIf { it.isNotEmpty() }
+                ?: "direct_session"
             val connectionType = rawPrefs["slot_connection_type"]?.trim()?.takeIf { it.isNotEmpty() } ?: "direct"
             val dpUnitId = rawPrefs["slot_dp_unit_id"]?.trim()?.takeIf { it.isNotEmpty() } ?: "dp_default"
             val tenantId = rawPrefs["active_tenant_id"]?.trim()?.takeIf { it.isNotEmpty() } ?: "ten_default"
@@ -116,6 +120,7 @@ class NativeBridgePlugin :
 
     @Volatile
     private var mediaPlayer: MediaPlayer? = null
+    private val playbackGeneration = AtomicLong(0L)
 
     var isEngineAttached = false
         private set
@@ -369,14 +374,20 @@ class NativeBridgePlugin :
     private fun handlePlayAudioUrl(ctx: Context, call: MethodCall, result: Result) {
         val url = call.argument<String>("url")?.trim().orEmpty()
         if (url.isEmpty()) {
-            result.error("INVALID_ARGS", "Audio url must not be blank", null)
+            result.success(false)
             return
         }
         val authToken = call.argument<String>("authToken")?.trim().orEmpty()
         val extraHeaders = call.argument<Map<String, Any?>>("headers").orEmpty()
+        val gen = playbackGeneration.incrementAndGet()
+        stopAudioPlaybackInternal(bumpGeneration = false)
 
         ioExecutor.execute {
             try {
+                if (gen != playbackGeneration.get()) {
+                    mainHandler.post { result.success(false) }
+                    return@execute
+                }
                 val reqBuilder = Request.Builder().url(url)
                 if (authToken.isNotEmpty()) {
                     reqBuilder.header("Authorization", "Bearer $authToken")
@@ -388,17 +399,25 @@ class NativeBridgePlugin :
                     }
                 }
 
-                val previewFile = File(ctx.cacheDir, "hemory_voice_preview.aac")
+                val previewFile = File(ctx.cacheDir, "hemory_voice_preview_${gen % 4}.aac")
                 audioHttpClient.newCall(reqBuilder.build()).execute().use { resp ->
                     if (!resp.isSuccessful) {
                         mainHandler.post {
-                            result.error("AUDIO_HTTP_${resp.code}", "Audio fetch failed (${resp.code})", null)
+                            RecordingEventStreamRegistry.emitEvent(
+                                "AUDIO_PLAYBACK_COMPLETED",
+                                mapOf("url" to url, "ok" to false, "status" to resp.code)
+                            )
+                            result.success(false)
                         }
                         return@execute
                     }
                     val body = resp.body ?: run {
                         mainHandler.post {
-                            result.error("AUDIO_EMPTY", "Audio response body was empty", null)
+                            RecordingEventStreamRegistry.emitEvent(
+                                "AUDIO_PLAYBACK_COMPLETED",
+                                mapOf("url" to url, "ok" to false)
+                            )
+                            result.success(false)
                         }
                         return@execute
                     }
@@ -408,8 +427,12 @@ class NativeBridgePlugin :
                 }
 
                 mainHandler.post {
+                    if (gen != playbackGeneration.get()) {
+                        result.success(false)
+                        return@post
+                    }
                     try {
-                        stopAudioPlaybackInternal()
+                        stopAudioPlaybackInternal(bumpGeneration = false)
                         val mp = MediaPlayer()
                         mp.setDataSource(previewFile.absolutePath)
                         mp.setOnCompletionListener { player ->
@@ -417,31 +440,50 @@ class NativeBridgePlugin :
                             if (mediaPlayer === player) {
                                 mediaPlayer = null
                             }
+                            RecordingEventStreamRegistry.emitEvent(
+                                "AUDIO_PLAYBACK_COMPLETED",
+                                mapOf("url" to url, "ok" to true)
+                            )
                         }
                         mp.setOnErrorListener { player, _, _ ->
                             runCatching { player.release() }
                             if (mediaPlayer === player) {
                                 mediaPlayer = null
                             }
+                            RecordingEventStreamRegistry.emitEvent(
+                                "AUDIO_PLAYBACK_COMPLETED",
+                                mapOf("url" to url, "ok" to false)
+                            )
                             true
                         }
                         mp.prepare()
                         mp.start()
                         mediaPlayer = mp
                         result.success(true)
-                    } catch (e: Exception) {
-                        result.error("AUDIO_PLAYBACK_FAILED", e.message, null)
+                    } catch (_: Exception) {
+                        RecordingEventStreamRegistry.emitEvent(
+                            "AUDIO_PLAYBACK_COMPLETED",
+                            mapOf("url" to url, "ok" to false)
+                        )
+                        result.success(false)
                     }
                 }
-            } catch (e: Exception) {
+            } catch (_: Exception) {
                 mainHandler.post {
-                    result.error("AUDIO_FETCH_FAILED", e.message, null)
+                    RecordingEventStreamRegistry.emitEvent(
+                        "AUDIO_PLAYBACK_COMPLETED",
+                        mapOf("url" to url, "ok" to false)
+                    )
+                    result.success(false)
                 }
             }
         }
     }
 
-    private fun stopAudioPlaybackInternal() {
+    private fun stopAudioPlaybackInternal(bumpGeneration: Boolean = true) {
+        if (bumpGeneration) {
+            playbackGeneration.incrementAndGet()
+        }
         val current = mediaPlayer
         mediaPlayer = null
         if (current != null) {
@@ -488,11 +530,12 @@ class NativeBridgePlugin :
 
         val securePrefs = HemoryPreferences(ctx)
         securePrefs.token = tokenStr
+        securePrefs.refreshToken = args["refreshToken"]?.toString()?.trim().orEmpty()
         securePrefs.baseUrl = baseUrlStr
 
         val prefs = ctx.getSharedPreferences(HemoryPreferences.PREFS_NAME, Context.MODE_PRIVATE)
         prefs.edit().apply {
-            putString("refresh_token", args["refreshToken"]?.toString()?.trim())
+            remove("refresh_token")
             putString("expires_at", args["expiresAt"]?.toString()?.trim())
             putString("slot_connection_type", args["slotConnectionType"]?.toString()?.trim())
             putString("slot_dp_unit_id", args["slotDpUnitId"]?.toString()?.trim())
@@ -533,7 +576,6 @@ class NativeBridgePlugin :
         if (token.isBlank()) return null
 
         val rawPrefs = mapOf(
-            "refresh_token" to prefs.getString("refresh_token", null),
             "expires_at" to prefs.getString("expires_at", null),
             "slot_connection_type" to prefs.getString("slot_connection_type", null),
             "slot_dp_unit_id" to prefs.getString("slot_dp_unit_id", null),
@@ -543,7 +585,8 @@ class NativeBridgePlugin :
         return normalizeStoredAuthMap(
             token = token,
             baseUrl = securePrefs.baseUrl,
-            rawPrefs = rawPrefs
+            rawPrefs = rawPrefs,
+            encryptedRefreshToken = securePrefs.refreshToken
         )
     }
 

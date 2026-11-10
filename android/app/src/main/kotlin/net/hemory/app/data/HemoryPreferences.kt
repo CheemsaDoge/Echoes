@@ -32,6 +32,8 @@ class HemoryPreferences(
         private const val KEY_URL = "url"
         private const val KEY_TOKEN_ENC = "token_enc"
         private const val KEY_TOKEN_LEGACY = "token"
+        private const val KEY_REFRESH_TOKEN_ENC = "refresh_token_enc"
+        private const val KEY_REFRESH_TOKEN_LEGACY = "refresh_token"
     }
 
     private fun getSecretKey(alias: String): SecretKey {
@@ -73,6 +75,24 @@ class HemoryPreferences(
         }
     }
 
+    /**
+     * Decrypts legacy SecurePreferences format: Base64(iv[12] || ciphertext_with_tag).
+     */
+    private fun decryptLegacyPacked(encoded: String, alias: String): String {
+        return try {
+            val packed = Base64.getDecoder().decode(encoded.trim())
+            if (packed.size <= 12 + 16) return ""
+            val iv = packed.copyOfRange(0, 12)
+            val cipherBytes = packed.copyOfRange(12, packed.size)
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            val spec = GCMParameterSpec(128, iv)
+            cipher.init(Cipher.DECRYPT_MODE, getSecretKey(alias), spec)
+            String(cipher.doFinal(cipherBytes), Charsets.UTF_8)
+        } catch (_: Exception) {
+            ""
+        }
+    }
+
     var baseUrl: String
         get() = prefs.getString(KEY_URL, DEFAULT_BASE_URL)
             ?.trim()
@@ -91,7 +111,15 @@ class HemoryPreferences(
                 val decrypted = decrypt(enc, TOKEN_ALIAS)
                 if (decrypted.isNotEmpty()) return decrypted
             }
-            return prefs.getString(KEY_TOKEN_LEGACY, "") ?: ""
+            val legacy = prefs.getString(KEY_TOKEN_LEGACY, "")?.trim().orEmpty()
+            if (legacy.isNotEmpty()) {
+                val migrated = decryptLegacyPacked(legacy, TOKEN_ALIAS)
+                if (migrated.isNotEmpty()) {
+                    token = migrated
+                    return migrated
+                }
+            }
+            return ""
         }
         set(value) {
             val trimmed = value.trim()
@@ -99,6 +127,29 @@ class HemoryPreferences(
             prefs.edit()
                 .putString(KEY_TOKEN_ENC, encoded)
                 .remove(KEY_TOKEN_LEGACY)
+                .commit()
+        }
+
+    var refreshToken: String
+        get() {
+            val enc = prefs.getString(KEY_REFRESH_TOKEN_ENC, "") ?: ""
+            if (enc.isNotEmpty()) {
+                val decrypted = decrypt(enc, TOKEN_ALIAS)
+                if (decrypted.isNotEmpty()) return decrypted
+            }
+            val legacyPlain = prefs.getString(KEY_REFRESH_TOKEN_LEGACY, "")?.trim().orEmpty()
+            if (legacyPlain.isNotEmpty()) {
+                refreshToken = legacyPlain
+                return legacyPlain
+            }
+            return ""
+        }
+        set(value) {
+            val trimmed = value.trim()
+            val encoded = if (trimmed.isEmpty()) "" else encrypt(trimmed, TOKEN_ALIAS)
+            prefs.edit()
+                .putString(KEY_REFRESH_TOKEN_ENC, encoded)
+                .remove(KEY_REFRESH_TOKEN_LEGACY)
                 .commit()
         }
 

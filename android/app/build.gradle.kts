@@ -103,9 +103,16 @@ fun computeGitSemanticVersion(): String {
     }
 }
 
+fun readCanonicalAppVersion(): String? = runCatching {
+    val versionFile = rootDir.resolve("../lib/core/version.dart")
+    if (!versionFile.isFile) return@runCatching null
+    val match = Regex("""kAppVersion\s*=\s*'([^']+)'""").find(versionFile.readText())
+    match?.groupValues?.getOrNull(1)?.trim()?.takeIf { it.isNotEmpty() }
+}.getOrNull()
+
 val effectiveCommitCount = (totalGitCommits ?: (v0311BaseCommitCount + 1)).coerceAtLeast(v0311BaseCommitCount)
 val computedVersionCode = overrideVersionCode ?: effectiveCommitCount
-val computedVersionName = overrideVersionName ?: computeGitSemanticVersion()
+val computedVersionName = overrideVersionName ?: readCanonicalAppVersion() ?: computeGitSemanticVersion()
 
 fun nonBlankEnvOrProp(vararg keys: String): String? {
     for (key in keys) {

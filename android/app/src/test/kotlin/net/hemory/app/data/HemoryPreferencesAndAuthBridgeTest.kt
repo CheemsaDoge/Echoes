@@ -4,6 +4,8 @@ import android.content.SharedPreferences
 import net.hemory.app.native.ipc.NativeBridgePlugin
 import org.junit.Assert.*
 import org.junit.Test
+import java.util.Base64
+import javax.crypto.Cipher
 import javax.crypto.spec.SecretKeySpec
 
 private class InMemorySharedPreferences : SharedPreferences {
@@ -99,24 +101,50 @@ class HemoryPreferencesAndAuthBridgeTest {
     }
 
     @Test
+    fun `legacy SecurePreferences packed ciphertext migrates to token_enc and rejects garbage`() {
+        val raw = InMemorySharedPreferences()
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, testKey)
+        val encrypted = cipher.doFinal("tok_legacy_upgraded_v1".toByteArray(Charsets.UTF_8))
+        val legacyPacked = Base64.getEncoder().encodeToString(cipher.iv + encrypted)
+
+        raw.edit().putString("token", legacyPacked).putString("refresh_token", "rt_legacy_plain").commit()
+        val prefs = HemoryPreferences(raw) { testKey }
+
+        assertEquals("tok_legacy_upgraded_v1", prefs.token)
+        assertNull("legacy 'token' key must be removed after migration", raw.getString("token", null))
+        assertNotNull("migrated 'token_enc' must be populated", raw.getString("token_enc", null))
+
+        assertEquals("rt_legacy_plain", prefs.refreshToken)
+        assertNull("plaintext 'refresh_token' must be removed after migration", raw.getString("refresh_token", null))
+        assertNotNull("encrypted 'refresh_token_enc' must be populated", raw.getString("refresh_token_enc", null))
+
+        // Corrupt legacy value must NOT leak raw ciphertext
+        val rawCorrupt = InMemorySharedPreferences()
+        rawCorrupt.edit().putString("token", "corrupt_raw_ciphertext_not_valid_gcm").commit()
+        val prefsCorrupt = HemoryPreferences(rawCorrupt) { testKey }
+        assertEquals("", prefsCorrupt.token)
+    }
+
+    @Test
     fun `normalizeStoredAuthMap returns numeric expiresAt and preserves distinct vaultId`() {
         val normalized = NativeBridgePlugin.normalizeStoredAuthMap(
             token = "tok_upgraded_user",
             baseUrl = "",
             rawPrefs = mapOf(
-                "refresh_token" to "",
                 "expires_at" to "",
                 "slot_connection_type" to null,
                 "slot_dp_unit_id" to null,
                 "active_tenant_id" to "ten_default",
                 "active_vault_id" to "vlt_default"
             ),
+            encryptedRefreshToken = "",
             nowEpochSeconds = 1_700_000_000L
         )
 
         assertNotNull(normalized)
         assertEquals("tok_upgraded_user", normalized!!["accessToken"])
-        assertEquals("tok_upgraded_user", normalized["refreshToken"])
+        assertEquals("direct_session", normalized["refreshToken"])
         assertTrue("expiresAt must be numeric Long for Auth7Tuple", normalized["expiresAt"] is Long)
         assertTrue((normalized["expiresAt"] as Long) > 1_700_000_000L)
         assertEquals("https://record.xmdoge.com", normalized["baseUrl"])

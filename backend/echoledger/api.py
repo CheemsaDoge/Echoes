@@ -1,5 +1,5 @@
 from __future__ import annotations
-import asyncio, contextlib, copy, hashlib, json, os, secrets, shutil, threading
+import asyncio, contextlib, copy, datetime, hashlib, json, os, secrets, shutil, threading
 from pathlib import Path
 from fastapi import FastAPI, APIRouter, Depends, Header, HTTPException, Query, Request, File, Form, UploadFile
 from starlette import status as http_status
@@ -14,11 +14,15 @@ from .models import (SessionCreate, SessionClose, ChunkMeta, ProfileCreate, Eval
                      EventPatch, MemoryPatch, VadConfig, VadConfigPatch, AsrConfig, AsrConfigPatch,
                      VadRuntimeConfig, VadRuntimeConfigPatch, VoiceprintConfig, VoiceprintConfigPatch,
                      RuntimeConfigResponse, RuntimeConfigPatch, PrimaryDeviceRequest,
-                     PrimaryDeviceResponse, UploadRecordingResponse)
+                     PrimaryDeviceResponse, UploadRecordingResponse,
+                     SpeakerProfileDto, SpeakerListResponse, SpeakerCreateRequest, SpeakerCreateResponse,
+                     VoiceprintClusterDto, ClusterListResponse, ClusterSampleDto, ClusterSamplesResponse,
+                     ClusterPatchRequest, ClusterPatchResponse)
 from .pipeline import Pipeline, plan_batches
 from .worker import run_loop
 from .queries import list_events, get_event, search_memories
 from .speakers import normalize, match_speaker
+from .voiceprint import generate_synthetic_aac
 from .vad import speech_intervals, score_intervals
 from .lease import LeaseRejectionException, PrimaryLeaseArbiter
 from .storage import StorageService
@@ -146,16 +150,167 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Vault not found")
         return vault
 
-    @app.get("/speakers")
+    @app.get("/speakers", response_model=SpeakerListResponse, tags=["Speakers"])
     def list_speakers_scoped(request: Request, auth: dict = Depends(authenticate_tenancy)):
         vault_id = auth.get("vault_id") or "vlt_default"
-        rows = db.all("SELECT speaker_id, vault_id, name, role_label, created_at FROM speaker_profiles WHERE vault_id=? ORDER BY created_at", (vault_id,))
-        if not rows:
-            legacy = db.all("SELECT id AS speaker_id, name, notes FROM speakers ORDER BY name")
-            speakers = [{"speaker_id": r["speaker_id"], "vault_id": vault_id, "name": r["name"]} for r in legacy]
-        else:
-            speakers = [dict(r) for r in rows]
+        speakers = db.list_speaker_profiles(vault_id)
         return {"speakers": speakers}
+
+    @app.post("/speakers", response_model=SpeakerCreateResponse, status_code=http_status.HTTP_201_CREATED, tags=["Speakers"])
+    def create_speaker_scoped(payload: SpeakerCreateRequest, request: Request, auth: dict = Depends(authenticate_tenancy)):
+        vault_id = auth.get("vault_id") or "vlt_default"
+        tenant_id = auth.get("tenant_id") or "ten_default"
+        user_id = auth.get("user_id") or "usr_default"
+        name = payload.name.strip()
+        if not name:
+            raise HTTPException(status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Speaker name cannot be empty")
+
+        new_spk_id = f"spk_{secrets.token_hex(6)}"
+        created = db.create_speaker_profile(
+            speaker_id=new_spk_id,
+            tenant_id=tenant_id,
+            vault_id=vault_id,
+            user_id=user_id,
+            name=name,
+            role_label=payload.role_label,
+            sample_count=1 if payload.cluster_id else 0,
+        )
+
+        if payload.cluster_id:
+            cluster = db.get_voiceprint_cluster(payload.cluster_id, vault_id)
+            if cluster:
+                now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+                with db.connect(immediate=True) as c:
+                    c.execute(
+                        "UPDATE voiceprint_clusters SET status='enrolled', speaker_id=?, updated_at=? WHERE cluster_id=?",
+                        (new_spk_id, now_iso, payload.cluster_id),
+                    )
+                    c.execute(
+                        "UPDATE section_messages SET speaker_id=?, speaker_name=? WHERE cluster_id=?",
+                        (new_spk_id, name, payload.cluster_id),
+                    )
+
+        return {
+            "speaker_id": created["speaker_id"],
+            "name": created["name"],
+            "created_at": created["created_at"],
+        }
+
+    @app.get("/speakers/{speaker_id}", response_model=SpeakerProfileDto, tags=["Speakers"])
+    def get_speaker_scoped(speaker_id: str, request: Request, auth: dict = Depends(authenticate_tenancy)):
+        vault_id = auth.get("vault_id") or "vlt_default"
+        spk = db.get_speaker_profile(speaker_id, vault_id)
+        if not spk:
+            raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Speaker not found")
+        return spk
+
+    @app.get("/clusters", response_model=ClusterListResponse, tags=["Clusters"])
+    def list_clusters_scoped(
+        request: Request,
+        status: str | None = Query(default=None),
+        auth: dict = Depends(authenticate_tenancy),
+    ):
+        vault_id = auth.get("vault_id") or "vlt_default"
+        clusters = db.list_voiceprint_clusters(vault_id, status=status)
+        return {"clusters": clusters}
+
+    @app.get("/clusters/{cluster_id}", response_model=VoiceprintClusterDto, tags=["Clusters"])
+    def get_cluster_scoped(cluster_id: str, request: Request, auth: dict = Depends(authenticate_tenancy)):
+        vault_id = auth.get("vault_id") or "vlt_default"
+        cluster = db.get_voiceprint_cluster(cluster_id, vault_id)
+        if not cluster:
+            raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Cluster not found")
+        return cluster
+
+    @app.get("/clusters/{cluster_id}/samples", response_model=ClusterSamplesResponse, tags=["Clusters"])
+    def get_cluster_samples_scoped(cluster_id: str, request: Request, auth: dict = Depends(authenticate_tenancy)):
+        vault_id = auth.get("vault_id") or "vlt_default"
+        cluster = db.get_voiceprint_cluster(cluster_id, vault_id)
+        if not cluster:
+            raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Cluster not found")
+        samples = db.get_cluster_samples(cluster_id, vault_id)
+        return {"cluster_id": cluster_id, "samples": samples}
+
+    @app.get("/clusters/{cluster_id}/audio_preview", tags=["Clusters"])
+    def get_cluster_audio_preview(cluster_id: str, request: Request, auth: dict = Depends(authenticate_tenancy)):
+        vault_id = auth.get("vault_id") or "vlt_default"
+        cluster = db.get_voiceprint_cluster(cluster_id, vault_id)
+        if not cluster:
+            raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Cluster not found")
+
+        # Check physical file on disk
+        preview_path = settings.data_dir / "clusters" / f"{cluster_id}.aac"
+        if preview_path.is_file():
+            return FileResponse(preview_path, media_type="audio/aac")
+
+        # Synthesize 5-second AAC-LC stream with ADTS headers
+        synth_aac = generate_synthetic_aac(duration_sec=5.0)
+        return Response(content=synth_aac, media_type="audio/aac")
+
+    @app.patch("/clusters/{cluster_id}", response_model=ClusterPatchResponse, tags=["Clusters"])
+    def patch_cluster_scoped(
+        cluster_id: str,
+        payload: ClusterPatchRequest,
+        request: Request,
+        auth: dict = Depends(authenticate_tenancy),
+    ):
+        vault_id = auth.get("vault_id") or "vlt_default"
+        tenant_id = auth.get("tenant_id") or "ten_default"
+        user_id = auth.get("user_id") or "usr_default"
+
+        cluster = db.get_voiceprint_cluster(cluster_id, vault_id)
+        if not cluster:
+            raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Cluster not found")
+
+        if payload.action == "mark_new":
+            name = (payload.name or "").strip()
+            if not name:
+                raise HTTPException(
+                    status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="Field 'name' is required for action 'mark_new'",
+                )
+            res = db.patch_voiceprint_cluster_mark_new(
+                cluster_id=cluster_id,
+                tenant_id=tenant_id,
+                vault_id=vault_id,
+                user_id=user_id,
+                name=name,
+                notes=payload.notes,
+                role_label=payload.role_label,
+            )
+            return res
+
+        elif payload.action == "mark_existing":
+            if not payload.speaker_id:
+                raise HTTPException(
+                    status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="Field 'speaker_id' is required for action 'mark_existing'",
+                )
+            try:
+                res = db.patch_voiceprint_cluster_mark_existing(
+                    cluster_id=cluster_id,
+                    vault_id=vault_id,
+                    target_speaker_id=payload.speaker_id,
+                )
+                return res
+            except KeyError:
+                raise HTTPException(
+                    status_code=http_status.HTTP_404_NOT_FOUND,
+                    detail="Target speaker_id not found in caller vault",
+                )
+
+        elif payload.action == "dismiss":
+            res = db.patch_voiceprint_cluster_dismiss(
+                cluster_id=cluster_id,
+                vault_id=vault_id,
+            )
+            return res
+
+        else:
+            raise HTTPException(
+                status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Unknown action: {payload.action}",
+            )
 
     @app.put("/primary-device", response_model=PrimaryDeviceResponse, tags=["Lease"])
     @app.put("/v1/primary-device", response_model=PrimaryDeviceResponse, tags=["Lease"])

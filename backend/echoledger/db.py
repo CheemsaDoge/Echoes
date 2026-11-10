@@ -88,6 +88,13 @@ class Database:
             migration_file = Path(__file__).parent / "migrations" / "001_initial_schema.sql"
             if migration_file.exists():
                 c.executescript(migration_file.read_text(encoding="utf-8"))
+            try:
+                table_info = [r[1] for r in c.execute("PRAGMA table_info(section_messages)").fetchall()]
+                if table_info and "cluster_id" not in table_info:
+                    c.execute("ALTER TABLE section_messages ADD COLUMN cluster_id VARCHAR(64) NULL REFERENCES voiceprint_clusters(cluster_id) ON DELETE SET NULL")
+                    c.execute("CREATE INDEX IF NOT EXISTS idx_section_messages_cluster ON section_messages(cluster_id)")
+            except Exception:
+                pass
             if not c.execute("SELECT 1 FROM profiles").fetchone():
                 c.execute("INSERT INTO profiles VALUES(?,?,?,?,1)", ("default-v1", "Conservative", VadConfig().model_dump_json(), now_ms()))
             types = [
@@ -351,4 +358,371 @@ class Database:
             )
             emit(c, "recording.segment_uploaded", segment_id)
         return self.one("SELECT * FROM recording_segments WHERE segment_id=?", (segment_id,))
+
+    # ========================================================================
+    # Speaker Profiles & Voiceprint Clusters (Milestone M3)
+    # ========================================================================
+
+    def list_speaker_profiles(self, vault_id: str) -> list[dict]:
+        rows = self.all(
+            """SELECT speaker_id, tenant_id, vault_id, user_id, name, suspected_name,
+                      role_label, color_palette, sample_count, created_at, updated_at
+               FROM speaker_profiles
+               WHERE vault_id = ?
+               ORDER BY created_at ASC""",
+            (vault_id,),
+        )
+        if not rows:
+            # Check legacy speakers table for backward compatibility if empty
+            legacy = self.all("SELECT id AS speaker_id, name, notes FROM speakers ORDER BY name")
+            now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+            return [
+                {
+                    "speaker_id": r["speaker_id"],
+                    "tenant_id": "ten_default",
+                    "vault_id": vault_id,
+                    "user_id": "usr_default",
+                    "name": r["name"],
+                    "suspected_name": None,
+                    "role_label": r.get("notes") or None,
+                    "color_palette": None,
+                    "sample_count": 0,
+                    "avatar_url": None,
+                    "created_at": now_iso,
+                    "updated_at": now_iso,
+                }
+                for r in legacy
+            ]
+        result = []
+        for r in rows:
+            d = dict(r)
+            d["avatar_url"] = None
+            result.append(d)
+        return result
+
+    def get_speaker_profile(self, speaker_id: str, vault_id: str | None = None) -> dict | None:
+        if vault_id:
+            row = self.one(
+                """SELECT speaker_id, tenant_id, vault_id, user_id, name, suspected_name,
+                          role_label, color_palette, sample_count, created_at, updated_at
+                   FROM speaker_profiles
+                   WHERE speaker_id = ? AND vault_id = ?""",
+                (speaker_id, vault_id),
+            )
+        else:
+            row = self.one(
+                """SELECT speaker_id, tenant_id, vault_id, user_id, name, suspected_name,
+                          role_label, color_palette, sample_count, created_at, updated_at
+                   FROM speaker_profiles
+                   WHERE speaker_id = ?""",
+                (speaker_id,),
+            )
+        if row:
+            d = dict(row)
+            d["avatar_url"] = None
+            return d
+        return None
+
+    def create_speaker_profile(
+        self,
+        speaker_id: str,
+        tenant_id: str,
+        vault_id: str,
+        user_id: str,
+        name: str,
+        role_label: str | None = None,
+        color_palette: str | None = None,
+        sample_count: int = 0,
+        suspected_name: str | None = None,
+    ) -> dict:
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+        with self.connect(immediate=True) as c:
+            c.execute(
+                """INSERT INTO speaker_profiles (
+                    speaker_id, tenant_id, vault_id, user_id, name, suspected_name,
+                    role_label, color_palette, sample_count, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    speaker_id, tenant_id, vault_id, user_id, name, suspected_name,
+                    role_label, color_palette, sample_count, now_iso, now_iso,
+                ),
+            )
+            emit(c, "speaker.created", speaker_id)
+        return self.get_speaker_profile(speaker_id, vault_id)
+
+    def list_voiceprint_clusters(self, vault_id: str, status: str | None = None) -> list[dict]:
+        if status:
+            rows = self.all(
+                """SELECT cluster_id, tenant_id, vault_id, speaker_id, status, confidence_score,
+                          occurrences_count, audio_sample_url, created_at, updated_at
+                   FROM voiceprint_clusters
+                   WHERE vault_id = ? AND status = ?
+                   ORDER BY created_at DESC""",
+                (vault_id, status),
+            )
+        else:
+            rows = self.all(
+                """SELECT cluster_id, tenant_id, vault_id, speaker_id, status, confidence_score,
+                          occurrences_count, audio_sample_url, created_at, updated_at
+                   FROM voiceprint_clusters
+                   WHERE vault_id = ?
+                   ORDER BY created_at DESC""",
+                (vault_id,),
+            )
+        result = []
+        for r in rows:
+            d = dict(r)
+            if not d.get("audio_sample_url"):
+                d["audio_sample_url"] = f"/clusters/{d['cluster_id']}/audio_preview"
+            result.append(d)
+        return result
+
+    def get_voiceprint_cluster(self, cluster_id: str, vault_id: str | None = None) -> dict | None:
+        if vault_id:
+            row = self.one(
+                """SELECT cluster_id, tenant_id, vault_id, speaker_id, status, confidence_score,
+                          occurrences_count, audio_sample_url, created_at, updated_at
+                   FROM voiceprint_clusters
+                   WHERE cluster_id = ? AND vault_id = ?""",
+                (cluster_id, vault_id),
+            )
+        else:
+            row = self.one(
+                """SELECT cluster_id, tenant_id, vault_id, speaker_id, status, confidence_score,
+                          occurrences_count, audio_sample_url, created_at, updated_at
+                   FROM voiceprint_clusters
+                   WHERE cluster_id = ?""",
+                (cluster_id,),
+            )
+        if row:
+            d = dict(row)
+            if not d.get("audio_sample_url"):
+                d["audio_sample_url"] = f"/clusters/{d['cluster_id']}/audio_preview"
+            return d
+        return None
+
+    def get_cluster_embedding_blob(self, cluster_id: str) -> bytes | None:
+        row = self.one("SELECT embedding_blob FROM voiceprint_clusters WHERE cluster_id = ?", (cluster_id,))
+        return row["embedding_blob"] if row else None
+
+    def create_voiceprint_cluster(
+        self,
+        cluster_id: str,
+        tenant_id: str,
+        vault_id: str,
+        status: str = "pending",
+        embedding_blob: bytes | None = None,
+        audio_sample_url: str | None = None,
+        confidence_score: float = 0.0,
+        occurrences_count: int = 1,
+        speaker_id: str | None = None,
+    ) -> dict:
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+        url = audio_sample_url or f"/clusters/{cluster_id}/audio_preview"
+        with self.connect(immediate=True) as c:
+            c.execute(
+                """INSERT INTO voiceprint_clusters (
+                    cluster_id, tenant_id, vault_id, speaker_id, status, embedding_blob,
+                    audio_sample_url, confidence_score, occurrences_count, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    cluster_id, tenant_id, vault_id, speaker_id, status, embedding_blob,
+                    url, confidence_score, occurrences_count, now_iso, now_iso,
+                ),
+            )
+            emit(c, "cluster.created", cluster_id)
+        return self.get_voiceprint_cluster(cluster_id, vault_id)
+
+    def patch_voiceprint_cluster_mark_new(
+        self,
+        cluster_id: str,
+        tenant_id: str,
+        vault_id: str,
+        user_id: str,
+        name: str,
+        notes: str | None = None,
+        role_label: str | None = None,
+    ) -> dict:
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+        new_spk_id = f"spk_{uuid.uuid4().hex[:12]}"
+        label = role_label or notes
+        with self.connect(immediate=True) as c:
+            cluster = c.execute(
+                "SELECT * FROM voiceprint_clusters WHERE cluster_id = ? AND vault_id = ?",
+                (cluster_id, vault_id),
+            ).fetchone()
+            if not cluster:
+                raise ValueError("Cluster not found")
+            sample_count = cluster["occurrences_count"] if "occurrences_count" in cluster.keys() else 1
+
+            # 1. Create speaker profile
+            c.execute(
+                """INSERT INTO speaker_profiles (
+                    speaker_id, tenant_id, vault_id, user_id, name,
+                    role_label, sample_count, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (new_spk_id, tenant_id, vault_id, user_id, name, label, sample_count, now_iso, now_iso),
+            )
+
+            # 2. Update cluster
+            c.execute(
+                """UPDATE voiceprint_clusters
+                   SET status = 'enrolled', speaker_id = ?, updated_at = ?
+                   WHERE cluster_id = ?""",
+                (new_spk_id, now_iso, cluster_id),
+            )
+
+            # 3. Retroactively update section_messages
+            c.execute(
+                """UPDATE section_messages
+                   SET speaker_id = ?, speaker_name = ?
+                   WHERE cluster_id = ?""",
+                (new_spk_id, name, cluster_id),
+            )
+            emit(c, "cluster.enrolled", cluster_id)
+            emit(c, "speaker.created", new_spk_id)
+
+        return {
+            "cluster_id": cluster_id,
+            "status": "enrolled",
+            "speaker_id": new_spk_id,
+        }
+
+    def patch_voiceprint_cluster_mark_existing(
+        self,
+        cluster_id: str,
+        vault_id: str,
+        target_speaker_id: str,
+    ) -> dict:
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+        with self.connect(immediate=True) as c:
+            cluster = c.execute(
+                "SELECT * FROM voiceprint_clusters WHERE cluster_id = ? AND vault_id = ?",
+                (cluster_id, vault_id),
+            ).fetchone()
+            if not cluster:
+                raise ValueError("Cluster not found")
+
+            spk = c.execute(
+                "SELECT * FROM speaker_profiles WHERE speaker_id = ? AND vault_id = ?",
+                (target_speaker_id, vault_id),
+            ).fetchone()
+            if not spk:
+                raise KeyError("Target speaker not found")
+
+            occurrences = cluster["occurrences_count"] if "occurrences_count" in cluster.keys() else 1
+
+            # 1. Update cluster
+            c.execute(
+                """UPDATE voiceprint_clusters
+                   SET status = 'merged', speaker_id = ?, updated_at = ?
+                   WHERE cluster_id = ?""",
+                (target_speaker_id, now_iso, cluster_id),
+            )
+
+            # 2. Update speaker sample count
+            c.execute(
+                """UPDATE speaker_profiles
+                   SET sample_count = sample_count + ?, updated_at = ?
+                   WHERE speaker_id = ?""",
+                (occurrences, now_iso, target_speaker_id),
+            )
+
+            # 3. Retroactively update section_messages
+            c.execute(
+                """UPDATE section_messages
+                   SET speaker_id = ?, speaker_name = ?
+                   WHERE cluster_id = ?""",
+                (target_speaker_id, spk["name"], cluster_id),
+            )
+            emit(c, "cluster.merged", cluster_id)
+
+        return {
+            "cluster_id": cluster_id,
+            "status": "merged",
+            "speaker_id": target_speaker_id,
+        }
+
+    def patch_voiceprint_cluster_dismiss(
+        self,
+        cluster_id: str,
+        vault_id: str,
+    ) -> dict:
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+        with self.connect(immediate=True) as c:
+            cluster = c.execute(
+                "SELECT * FROM voiceprint_clusters WHERE cluster_id = ? AND vault_id = ?",
+                (cluster_id, vault_id),
+            ).fetchone()
+            if not cluster:
+                raise ValueError("Cluster not found")
+            c.execute(
+                """UPDATE voiceprint_clusters
+                   SET status = 'dismissed', updated_at = ?
+                   WHERE cluster_id = ?""",
+                (now_iso, cluster_id),
+            )
+            emit(c, "cluster.dismissed", cluster_id)
+
+        return {
+            "cluster_id": cluster_id,
+            "status": "dismissed",
+        }
+
+    def get_cluster_samples(self, cluster_id: str, vault_id: str) -> list[dict]:
+        cluster = self.get_voiceprint_cluster(cluster_id, vault_id)
+        if not cluster:
+            raise ValueError("Cluster not found")
+
+        messages = self.all(
+            """SELECT sm.message_id, sm.section_id, sm.start_ms, sm.end_ms, sm.confidence,
+                      s.live_session_id AS session_id
+               FROM section_messages sm
+               LEFT JOIN sections s ON sm.section_id = s.section_id
+               WHERE sm.cluster_id = ?
+               ORDER BY sm.start_ms ASC""",
+            (cluster_id,),
+        )
+        samples = []
+        if messages:
+            for m in messages:
+                samples.append({
+                    "sample_id": f"smp_{m['message_id']}",
+                    "segment_id": m.get("section_id"),
+                    "session_id": m.get("session_id"),
+                    "audio_url": f"/clusters/{cluster_id}/audio_preview",
+                    "start_ms": int(m["start_ms"]),
+                    "end_ms": int(m["end_ms"]),
+                    "duration_ms": int(m["end_ms"] - m["start_ms"]),
+                    "confidence": float(m["confidence"]),
+                })
+        else:
+            # Fallback sample representing cluster
+            samples.append({
+                "sample_id": f"smp_{cluster_id}",
+                "segment_id": None,
+                "session_id": None,
+                "audio_url": f"/clusters/{cluster_id}/audio_preview",
+                "start_ms": 0,
+                "end_ms": 5000,
+                "duration_ms": 5000,
+                "confidence": float(cluster.get("confidence_score", 1.0)),
+            })
+        return samples
+
+    def retroactive_update_section_messages_speaker(
+        self,
+        cluster_id: str,
+        speaker_id: str,
+        speaker_name: str,
+    ) -> int:
+        with self.connect(immediate=True) as c:
+            cur = c.execute(
+                """UPDATE section_messages
+                   SET speaker_id = ?, speaker_name = ?
+                   WHERE cluster_id = ?""",
+                (speaker_id, speaker_name, cluster_id),
+            )
+            return cur.rowcount
+
 

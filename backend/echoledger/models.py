@@ -468,3 +468,76 @@ class McpApiKeyCreated(StrictModel):
     scopes: list[str]
     created_at: str
 
+# ============================================================================
+# Speakers & Voiceprint Clusters DTOs (Milestone M3)
+# ============================================================================
+
+class SpeakerProfileDto(StrictModel):
+    speaker_id: str
+    tenant_id: str
+    vault_id: str
+    user_id: str
+    name: str
+    suspected_name: str | None = None
+    role_label: str | None = None
+    color_palette: str | None = None
+    sample_count: int = 0
+    avatar_url: str | None = None
+    created_at: str
+    updated_at: str
+
+class SpeakerListResponse(StrictModel):
+    speakers: list[SpeakerProfileDto]
+
+class SpeakerCreateRequest(StrictModel):
+    name: str = Field(min_length=1, max_length=255)
+    role_label: str | None = None
+    cluster_id: str | None = None
+
+class SpeakerCreateResponse(StrictModel):
+    speaker_id: str
+    name: str
+    created_at: str
+
+class VoiceprintClusterDto(StrictModel):
+    cluster_id: str
+    tenant_id: str
+    vault_id: str
+    speaker_id: str | None = None
+    status: Literal["pending", "identified", "enrolled", "merged", "dismissed"]
+    audio_sample_url: str | None = None
+    confidence_score: float = 0.0
+    occurrences_count: int = 1
+    created_at: str
+    updated_at: str
+
+class ClusterListResponse(StrictModel):
+    clusters: list[VoiceprintClusterDto]
+
+class ClusterSampleDto(StrictModel):
+    sample_id: str
+    segment_id: str | None = None
+    session_id: str | None = None
+    audio_url: str
+    start_ms: int
+    end_ms: int
+    duration_ms: int
+    confidence: float = 1.0
+
+class ClusterSamplesResponse(StrictModel):
+    cluster_id: str
+    samples: list[ClusterSampleDto]
+
+class ClusterPatchRequest(StrictModel):
+    action: Literal["mark_new", "mark_existing", "dismiss"]
+    name: str | None = None
+    notes: str | None = None
+    role_label: str | None = None
+    speaker_id: str | None = None
+
+class ClusterPatchResponse(StrictModel):
+    cluster_id: str
+    status: str
+    speaker_id: str | None = None
+
+

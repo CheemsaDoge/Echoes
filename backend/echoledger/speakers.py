@@ -5,8 +5,18 @@ import math
 from pathlib import Path
 import random
 import time
-from typing import Protocol
+from typing import Any, Protocol
 import numpy as np
+from .voiceprint import (
+    project_to_512,
+    generate_synthetic_embedding,
+    pack_embedding,
+    unpack_embedding,
+    cosine_similarity,
+    compute_centroid,
+    update_centroid_incremental,
+    update_centroid_ema,
+)
 
 def normalize(vector: list[float]) -> np.ndarray:
     a = np.asarray(vector, dtype=np.float64)
@@ -72,6 +82,32 @@ class SpeakerEmbedder:
         stream.input_finished()
         return self.extractor.compute(stream)
 
+class ProjectedEmbedder:
+    """Wraps an underlying embedder and projects outputs to target dimensions (e.g. 512)."""
+    def __init__(self, base_embedder: Any, target_dim: int = 512, model_id: str = "wespeaker_ecapa_tdnn512"):
+        self.base_embedder = base_embedder
+        self.dim = target_dim
+        self.model_id = model_id
+
+    def extract(self, samples: np.ndarray, sample_rate: int = 16000) -> list[float]:
+        raw = self.base_embedder.extract(samples, sample_rate=sample_rate)
+        if not raw or all(x == 0.0 for x in raw):
+            return [0.0] * self.dim
+        proj = project_to_512(np.array(raw, dtype=np.float32))
+        return proj.tolist()
+
+class SyntheticEmbedder:
+    """Deterministic synthetic embedder when ONNX runtime or model weights are unavailable."""
+    def __init__(self, model_id: str = "wespeaker_ecapa_tdnn512", dim: int = 512):
+        self.model_id = model_id
+        self.dim = dim
+
+    def extract(self, samples: np.ndarray, sample_rate: int = 16000) -> list[float]:
+        if len(samples) == 0:
+            return [0.0] * self.dim
+        h = hashlib.sha256(samples[:min(len(samples), 32000)].tobytes()).hexdigest()[:16]
+        return generate_synthetic_embedding(h).tolist()
+
 SPEAKER_MODEL_FILES = {
     "campplus_cn": "3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx",
     "eres2net_cn": "3dspeaker_speech_eres2net_sv_zh-cn_16k-common.onnx",
@@ -101,7 +137,22 @@ def list_available_speaker_models(models_dir: Path = Path("data/models/speakers"
         })
     return res
 
-def make_speaker_embedder(name: str, model_path: str = "") -> SpeakerEmbedder:
+def make_speaker_embedder(name: str, model_path: str = "") -> Any:
+    if name == "wespeaker_ecapa_tdnn512":
+        target_file = Path("data/models/speakers") / "wespeaker_ecapa_tdnn512.onnx"
+        if target_file.is_file():
+            return SpeakerEmbedder(str(target_file), model_id=name)
+        # Check if any base model is available to project to 512-dim
+        for candidate in ["wespeaker_resnet34", "campplus_cn", "eres2net_cn", "nemo_speakernet"]:
+            cand_file = Path("data/models/speakers") / SPEAKER_MODEL_FILES[candidate]
+            if cand_file.is_file():
+                try:
+                    base = SpeakerEmbedder(str(cand_file), model_id=candidate)
+                    return ProjectedEmbedder(base, target_dim=512, model_id=name)
+                except Exception:
+                    pass
+        return SyntheticEmbedder(model_id=name, dim=512)
+
     if name not in SPEAKER_MODEL_FILES:
         raise ValueError(f"Unknown speaker model: {name}. Supported: {list(SPEAKER_MODEL_FILES.keys())}")
     target_path = model_path
@@ -299,3 +350,109 @@ def spot_check_speaker_models(
         "recommended_config": winner["best_config"] if winner else None,
         "models": model_evaluations,
     }
+
+
+def resolve_speaker_name(
+    speaker_id: str | None,
+    utterance_context: dict[str, Any],
+) -> str:
+    """
+    Contract C6: 3-Tier Dynamic Speaker Fallback Resolution.
+    - Tier 1: Confirmed Named Speaker Profile (non-empty name)
+    - Tier 2: Activity Roster Suspect (non-empty suspected_name)
+    - Tier 3: Sequential Unknown Speaker Index (Speaker {unknown_speaker_index})
+    """
+    speaker_profiles = utterance_context.get("speaker_profiles", {})
+    active_roster = utterance_context.get("active_roster", {})
+
+    # Tier 1: Enrolled / Named Speaker Profiles
+    if speaker_id and speaker_id in speaker_profiles:
+        profile = speaker_profiles[speaker_id]
+        name = profile.get("name") if isinstance(profile, dict) else getattr(profile, "name", None)
+        if name and str(name).strip():
+            return str(name).strip()
+
+    # Tier 2: Activity Roster Suspects
+    if speaker_id and speaker_id in active_roster:
+        roster_entry = active_roster[speaker_id]
+        suspected = (
+            roster_entry.get("suspected_name")
+            if isinstance(roster_entry, dict)
+            else getattr(roster_entry, "suspected_name", None)
+        )
+        if suspected and str(suspected).strip():
+            return str(suspected).strip()
+
+    # Fallback to suspected_name on profile if present
+    if speaker_id and speaker_id in speaker_profiles:
+        profile = speaker_profiles[speaker_id]
+        suspected = (
+            profile.get("suspected_name")
+            if isinstance(profile, dict)
+            else getattr(profile, "suspected_name", None)
+        )
+        if suspected and str(suspected).strip():
+            return str(suspected).strip()
+
+    # Tier 3: Sequential Unknown Speaker Index
+    unknown_idx = utterance_context.get("unknown_speaker_index", 1)
+    return f"Speaker {unknown_idx}"
+
+
+class SessionSpeakerResolver:
+    """Session-scoped deterministic speaker resolver managing Tier 3 sequential indexing."""
+
+    def __init__(
+        self,
+        speaker_profiles: dict[str, Any] | None = None,
+        active_roster: dict[str, Any] | None = None,
+    ):
+        self.speaker_profiles = dict(speaker_profiles or {})
+        self.active_roster = dict(active_roster or {})
+        self._unknown_map: dict[str, int] = {}
+        self._next_index: int = 1
+
+    def resolve(
+        self,
+        speaker_id: str | None = None,
+        cluster_id: str | None = None,
+        local_label: str | None = None,
+    ) -> str:
+        # Tier 1: Enrolled Profile
+        if speaker_id and speaker_id in self.speaker_profiles:
+            profile = self.speaker_profiles[speaker_id]
+            name = profile.get("name") if isinstance(profile, dict) else getattr(profile, "name", None)
+            if name and str(name).strip():
+                return str(name).strip()
+
+        # Tier 2: Active Roster Suspect
+        key = speaker_id or cluster_id or local_label
+        if key and key in self.active_roster:
+            roster_entry = self.active_roster[key]
+            suspected = (
+                roster_entry.get("suspected_name")
+                if isinstance(roster_entry, dict)
+                else getattr(roster_entry, "suspected_name", None)
+            )
+            if suspected and str(suspected).strip():
+                return str(suspected).strip()
+
+        if speaker_id and speaker_id in self.speaker_profiles:
+            profile = self.speaker_profiles[speaker_id]
+            suspected = (
+                profile.get("suspected_name")
+                if isinstance(profile, dict)
+                else getattr(profile, "suspected_name", None)
+            )
+            if suspected and str(suspected).strip():
+                return str(suspected).strip()
+
+        # Tier 3: Deterministic Sequential Index
+        unassigned_key = speaker_id or cluster_id or local_label or f"_anon_{len(self._unknown_map) + 1}"
+        if unassigned_key not in self._unknown_map:
+            self._unknown_map[unassigned_key] = self._next_index
+            self._next_index += 1
+
+        idx = self._unknown_map[unassigned_key]
+        return f"Speaker {idx}"
+

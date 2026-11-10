@@ -206,6 +206,7 @@ CREATE TABLE IF NOT EXISTS section_messages (
     message_id VARCHAR(64) PRIMARY KEY,
     section_id VARCHAR(64) NOT NULL REFERENCES sections(section_id) ON DELETE CASCADE,
     speaker_id VARCHAR(64) NULL,                         -- Nullable if speaker unassigned
+    cluster_id VARCHAR(64) NULL REFERENCES voiceprint_clusters(cluster_id) ON DELETE SET NULL,
     speaker_name VARCHAR(128) NOT NULL DEFAULT 'Unknown',
     content TEXT NOT NULL,
     start_ms BIGINT NOT NULL,
@@ -216,6 +217,7 @@ CREATE TABLE IF NOT EXISTS section_messages (
 
 CREATE INDEX IF NOT EXISTS idx_section_messages_section ON section_messages(section_id);
 CREATE INDEX IF NOT EXISTS idx_section_messages_speaker ON section_messages(speaker_id);
+CREATE INDEX IF NOT EXISTS idx_section_messages_cluster ON section_messages(cluster_id);
 CREATE INDEX IF NOT EXISTS idx_section_messages_time ON section_messages(section_id, start_ms);
 
 -- ----------------------------------------------------------------------------
@@ -266,14 +268,14 @@ CREATE TABLE IF NOT EXISTS voiceprint_clusters (
     tenant_id VARCHAR(64) NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
     vault_id VARCHAR(64) NOT NULL REFERENCES vaults(vault_id) ON DELETE CASCADE,
     speaker_id VARCHAR(64) NULL REFERENCES speaker_profiles(speaker_id) ON DELETE SET NULL,
-    status VARCHAR(32) NOT NULL DEFAULT 'pending',        -- 'pending', 'identified', 'dismissed'
+    status VARCHAR(32) NOT NULL DEFAULT 'pending',        -- 'pending', 'identified', 'enrolled', 'merged', 'dismissed'
     embedding_blob BYTEA NULL,                            -- 512-dim voiceprint vector
     audio_sample_url TEXT NULL,
     confidence_score REAL NOT NULL DEFAULT 0.0,
     occurrences_count INTEGER NOT NULL DEFAULT 1,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT chk_clusters_status CHECK (status IN ('pending', 'identified', 'dismissed'))
+    CONSTRAINT chk_clusters_status CHECK (status IN ('pending', 'identified', 'enrolled', 'merged', 'dismissed'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_voiceprint_clusters_status ON voiceprint_clusters(vault_id, status);

@@ -1,5 +1,5 @@
 from __future__ import annotations
-import contextlib, json, sqlite3, time, uuid
+import contextlib, datetime, json, sqlite3, time, uuid
 from pathlib import Path
 from .models import VadConfig
 
@@ -85,6 +85,9 @@ class Database:
             versions = [r[0] for r in c.execute("SELECT version FROM schema_version")]
             if versions != [1]:
                 raise RuntimeError("Unsupported database schema; migrate explicitly")
+            migration_file = Path(__file__).parent / "migrations" / "001_initial_schema.sql"
+            if migration_file.exists():
+                c.executescript(migration_file.read_text(encoding="utf-8"))
             if not c.execute("SELECT 1 FROM profiles").fetchone():
                 c.execute("INSERT INTO profiles VALUES(?,?,?,?,1)", ("default-v1", "Conservative", VadConfig().model_dump_json(), now_ms()))
             types = [
@@ -96,6 +99,19 @@ class Database:
             ]
             for key, name, words, color in types:
                 c.execute("INSERT OR IGNORE INTO event_types VALUES(?,?,?,?)", (key, name, json.dumps(words), color))
+            if not c.execute("SELECT 1 FROM tenants WHERE tenant_id='ten_default'").fetchone():
+                c.execute(
+                    "INSERT OR IGNORE INTO tenants (tenant_id, name, slug, plan_tier, status) VALUES ('ten_default', 'Default Tenant', 'default', 'free', 'active')"
+                )
+                c.execute(
+                    "INSERT OR IGNORE INTO vaults (vault_id, tenant_id, name, is_default) VALUES ('vlt_default', 'ten_default', 'Default Vault', 1)"
+                )
+                c.execute(
+                    "INSERT OR IGNORE INTO users (user_id, tenant_id, email, full_name) VALUES ('usr_default', 'ten_default', 'user@hemory.local', 'Default User')"
+                )
+                c.execute(
+                    "INSERT OR IGNORE INTO dp_instances (dp_instance_id, tenant_id, vault_id, user_id, dp_instance_name, device_kind, is_primary) VALUES ('dp_default', 'ten_default', 'vlt_default', 'usr_default', 'Default Phone', 'phone', 1)"
+                )
         try:
             self.path.chmod(0o600)
         except OSError:
@@ -197,3 +213,133 @@ class Database:
                 settings.auto_match_enabled = val.lower() == "true"
             elif key == "voiceprint.consent_required" and hasattr(settings, "consent_required"):
                 settings.consent_required = val.lower() == "true"
+
+    def get_tenant(self, tenant_id: str) -> dict | None:
+        return self.one("SELECT * FROM tenants WHERE tenant_id=?", (tenant_id,))
+
+    def list_tenants(self) -> list[dict]:
+        return self.all("SELECT * FROM tenants ORDER BY created_at")
+
+    def get_vault(self, vault_id: str, tenant_id: str | None = None) -> dict | None:
+        if tenant_id:
+            return self.one("SELECT * FROM vaults WHERE vault_id=? AND tenant_id=?", (vault_id, tenant_id))
+        return self.one("SELECT * FROM vaults WHERE vault_id=?", (vault_id,))
+
+    def list_vaults(self, tenant_id: str) -> list[dict]:
+        return self.all("SELECT * FROM vaults WHERE tenant_id=? ORDER BY created_at", (tenant_id,))
+
+    def get_user(self, user_id: str) -> dict | None:
+        return self.one("SELECT * FROM users WHERE user_id=?", (user_id,))
+
+    def get_dp_instance(self, dp_instance_id: str) -> dict | None:
+        return self.one("SELECT * FROM dp_instances WHERE dp_instance_id=?", (dp_instance_id,))
+
+    def list_dp_instances(self, vault_id: str) -> list[dict]:
+        return self.all("SELECT * FROM dp_instances WHERE vault_id=? ORDER BY created_at", (vault_id,))
+
+    def get_primary_dp_instance(self, tenant_id: str, vault_id: str, user_id: str | None = None) -> dict | None:
+        if user_id:
+            return self.one(
+                "SELECT * FROM dp_instances WHERE tenant_id=? AND vault_id=? AND user_id=? AND is_primary=1",
+                (tenant_id, vault_id, user_id),
+            )
+        return self.one(
+            "SELECT * FROM dp_instances WHERE tenant_id=? AND vault_id=? AND is_primary=1",
+            (tenant_id, vault_id),
+        )
+
+    def set_primary_dp_instance(self, tenant_id: str, vault_id: str, user_id: str, dp_instance_id: str) -> str:
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+        with self.connect(immediate=True) as c:
+            c.execute(
+                "UPDATE dp_instances SET is_primary=0, updated_at=? WHERE tenant_id=? AND vault_id=? AND user_id=? AND is_primary!=0",
+                (now_iso, tenant_id, vault_id, user_id),
+            )
+            c.execute(
+                "UPDATE dp_instances SET is_primary=1, updated_at=?, last_active_at=? WHERE dp_instance_id=?",
+                (now_iso, now_iso, dp_instance_id),
+            )
+        return now_iso
+
+    def get_listening_schedule(
+        self, tenant_id: str, vault_id: str, user_id: str | None = None, dp_instance_id: str | None = None
+    ) -> dict | None:
+        if dp_instance_id:
+            row = self.one(
+                "SELECT * FROM listening_schedules WHERE dp_instance_id=? AND tenant_id=? AND vault_id=?",
+                (dp_instance_id, tenant_id, vault_id),
+            )
+            if row:
+                return row
+        if user_id:
+            return self.one(
+                "SELECT * FROM listening_schedules WHERE user_id=? AND tenant_id=? AND vault_id=?",
+                (user_id, tenant_id, vault_id),
+            )
+        return None
+
+    def upsert_recording_session(
+        self,
+        live_session_id: str,
+        tenant_id: str,
+        vault_id: str,
+        user_id: str,
+        dp_instance_id: str,
+        local_day_key: str,
+        started_at: str,
+        title: str | None = None,
+    ) -> dict:
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+        with self.connect(immediate=True) as c:
+            existing = c.execute("SELECT * FROM recording_sessions WHERE live_session_id=?", (live_session_id,)).fetchone()
+            if not existing:
+                c.execute(
+                    """INSERT INTO recording_sessions (live_session_id, tenant_id, vault_id, user_id, dp_instance_id, local_day_key, title, started_at, status, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'recording', ?, ?)""",
+                    (live_session_id, tenant_id, vault_id, user_id, dp_instance_id, local_day_key, title, started_at, now_iso, now_iso),
+                )
+            else:
+                c.execute(
+                    "UPDATE recording_sessions SET updated_at=? WHERE live_session_id=?",
+                    (now_iso, live_session_id),
+                )
+        return self.one("SELECT * FROM recording_sessions WHERE live_session_id=?", (live_session_id,))
+
+    def insert_recording_segment(
+        self,
+        segment_id: str,
+        live_session_id: str,
+        tenant_id: str,
+        vault_id: str,
+        user_id: str,
+        dp_instance_id: str,
+        segment_index: int,
+        storage_key: str,
+        started_at: str,
+        audio_format: str = "aac",
+        sample_rate: int = 16000,
+        bitrate_kbps: int = 48,
+        duration_ms: int = 0,
+        file_size_bytes: int = 0,
+        split_reason: str | None = None,
+        upload_status: str = "uploaded",
+    ) -> dict:
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+        with self.connect(immediate=True) as c:
+            c.execute(
+                """INSERT INTO recording_segments (
+                    segment_id, live_session_id, tenant_id, vault_id, user_id, dp_instance_id,
+                    segment_index, storage_key, audio_format, sample_rate, bitrate_kbps,
+                    duration_ms, file_size_bytes, started_at, finalized_at, split_reason,
+                    upload_status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    segment_id, live_session_id, tenant_id, vault_id, user_id, dp_instance_id,
+                    segment_index, storage_key, audio_format, sample_rate, bitrate_kbps,
+                    duration_ms, file_size_bytes, started_at, now_iso, split_reason,
+                    upload_status, now_iso, now_iso,
+                ),
+            )
+            emit(c, "recording.segment_uploaded", segment_id)
+        return self.one("SELECT * FROM recording_segments WHERE segment_id=?", (segment_id,))
+

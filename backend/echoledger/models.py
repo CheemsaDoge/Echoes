@@ -295,3 +295,176 @@ class AsrSegment(StrictModel):
         if self.end_ms <= self.start_ms:
             raise ValueError("invalid transcript interval")
         return self
+
+
+# ============================================================================
+# Tenancy & Multi-Tenant Entities (Milestone M2)
+# ============================================================================
+
+class TenancyContext(StrictModel):
+    user_id: str
+    tenant_id: str
+    vault_id: str
+    dp_instance_id: str | None = None
+    email: str | None = None
+    roles: list[str] = Field(default_factory=lambda: ["user"])
+    auth_mode: Literal["jwt", "dp_session", "api_key", "bearer_legacy"] = "jwt"
+
+class TenantDto(StrictModel):
+    tenant_id: str
+    name: str
+    slug: str
+    plan_tier: Literal["free", "pro", "enterprise"] = "free"
+    status: Literal["active", "suspended", "disconnected"] = "active"
+    is_active: bool = False
+    settings: dict = Field(default_factory=dict)
+    created_at: str | None = None
+    updated_at: str | None = None
+
+class TenantListResponse(StrictModel):
+    tenants: list[TenantDto]
+
+class TenantSwitchResponse(StrictModel):
+    tenant_id: str
+    vault_id: str
+    access_token: str
+
+class VaultDto(StrictModel):
+    vault_id: str
+    tenant_id: str
+    name: str
+    is_default: bool = False
+    status: Literal["initializing", "ready", "locked"] = "ready"
+    storage_used_bytes: int = 0
+    storage_quota_bytes: int = 10737418240
+    created_at: str | None = None
+    updated_at: str | None = None
+
+class VaultListResponse(StrictModel):
+    vaults: list[VaultDto]
+
+class DpInstanceCreate(StrictModel):
+    dp_instance_name: str = Field(min_length=1, max_length=255)
+    device_kind: Literal["phone", "watch", "official_cloud", "agent"]
+    device_metadata: dict = Field(default_factory=dict)
+
+class DpInstanceDto(StrictModel):
+    dp_instance_id: str
+    dp_instance_name: str
+    dp_unit_url: str = ""
+    dp_base_url: str = ""
+    device_kind: Literal["phone", "watch", "official_cloud", "agent"]
+    is_primary: bool = False
+    is_official: bool = False
+    last_active_at: str | None = None
+    created_at: str | None = None
+
+class DpInstanceListResponse(StrictModel):
+    instances: list[DpInstanceDto]
+
+class DeviceBindingCreate(StrictModel):
+    dp_instance_id: str
+    device_unique_identifier: str = Field(min_length=1, max_length=255)
+    device_model: str | None = None
+    os_name: Literal["android", "ios", "watchos", "linux"]
+    os_version: str | None = None
+    push_token: str | None = None
+
+class DeviceBindingDto(StrictModel):
+    binding_id: str
+    dp_instance_id: str
+    device_unique_identifier: str
+    device_model: str | None = None
+    os_name: str
+    os_version: str | None = None
+    status: Literal["bound", "revoked", "disconnected"] = "bound"
+    dp_session_token: str | None = None
+    last_active_at: str | None = None
+
+class DeviceBindingListResponse(StrictModel):
+    bindings: list[DeviceBindingDto]
+
+class PushTokenRegistration(StrictModel):
+    device_unique_identifier: str
+    push_token: str
+    push_provider: str = "fcm"
+    app_version: str | None = None
+
+# ============================================================================
+# Single Primary Lease Protocol (Contract C3)
+# ============================================================================
+
+class PrimaryDeviceRequest(StrictModel):
+    dp_instance_id: str
+    vault_id: str
+
+class PrimaryDeviceResponse(StrictModel):
+    dp_instance_id: str
+    is_primary: bool = True
+    effective_from: str
+
+# ============================================================================
+# Audio Ingestion & Multipart Payload (Contract C2)
+# ============================================================================
+
+class CaptureMetadata(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    split_reason: Literal["window", "silence", "size_limit", "user_stop", "silence_window", "hard_limit"] = "window"
+    sample_rate: int = 16000
+    bitrate_kbps: int = 48
+    channels: int = 1
+    battery_level: float | None = None
+    is_charging: bool | None = None
+    live_session_id: str | None = None
+    dp_instance_id: str | None = None
+    device_id: str | None = None
+    silence_ms_before_cut: int | None = None
+    segment_index: int | None = None
+    recording_id: str | None = None
+
+class UploadRecordingResponse(StrictModel):
+    recording_id: str
+    asset_id: str
+    artifact_id: str
+    storage_key: str
+    status: Literal["queued_for_processing"] = "queued_for_processing"
+
+UploadResponse = UploadRecordingResponse
+
+# ============================================================================
+# Listening Schedules & MCP API Keys
+# ============================================================================
+
+class WeeklyWindowDto(StrictModel):
+    weekday: int = Field(ge=1, le=7)  # 1 (Mon) - 7 (Sun)
+    start_minutes: int = Field(ge=0, le=1440)
+    end_minutes: int = Field(ge=0, le=1440)
+    window_start: str = "09:00"
+    window_end: str = "18:00"
+
+    @model_validator(mode="after")
+    def validate_window_order(self):
+        if self.end_minutes <= self.start_minutes:
+            raise ValueError("end_minutes must be greater than start_minutes")
+        return self
+
+class ListeningScheduleDto(StrictModel):
+    weekly_windows: list[WeeklyWindowDto] = Field(default_factory=list)
+    is_enabled: bool = True
+    revision: int = 1
+    timezone: str = "UTC"
+
+class McpApiKeyCreate(StrictModel):
+    key_name: str = Field(min_length=1, max_length=128)
+    dp_instance_id: str
+    scopes: list[str] = Field(default_factory=lambda: ["search_memory", "search_sections"])
+
+class McpApiKeyCreated(StrictModel):
+    key_id: str
+    key_name: str
+    api_key: str  # Plaintext key returned once
+    key_prefix: str = "hm_live_"
+    scopes: list[str]
+    created_at: str
+

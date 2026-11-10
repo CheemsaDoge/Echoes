@@ -92,9 +92,15 @@ def get_recording_mutations_response(
                 created_at=m["created_at"],
             )
         )
+    max_row = db.one(
+        "SELECT COALESCE(MAX(cursor), 0) AS max_cursor FROM recording_mutations WHERE vault_id = ?",
+        (vault_id,),
+    )
+    latest_cursor = int((max_row or {}).get("max_cursor") or 0)
     return RecordingMutationsResponse(
         mutations=mutations,
         next_cursor=next_cursor,
+        latest_cursor=max(latest_cursor, next_cursor),
         has_more=has_more,
     )
 

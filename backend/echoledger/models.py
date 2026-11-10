@@ -656,6 +656,7 @@ class RecordingMutationDto(StrictModel):
 class RecordingMutationsResponse(StrictModel):
     mutations: list[RecordingMutationDto]
     next_cursor: int
+    latest_cursor: int = 0
     has_more: bool
 
 

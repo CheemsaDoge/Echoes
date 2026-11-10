@@ -210,10 +210,12 @@ def _normalize_message_epoch_ms(
 class HemorySegmentProcessor:
     """Processes uploaded `recording_segments` & `processing_chains` end-to-end."""
 
-    def __init__(self, pipeline: Any):
+    def __init__(self, pipeline: Any, retry_backoff_sec: float = 5.0, max_retries: int = 3):
         self.pipeline = pipeline
         self.db: Database = pipeline.db
         self.settings: Settings = pipeline.settings
+        self.retry_backoff_sec = retry_backoff_sec
+        self.max_retries = max_retries
         self.storage = StorageService(
             self.settings.data_dir,
             storage_dir=getattr(self.settings, "storage_dir", None),
@@ -234,6 +236,7 @@ class HemorySegmentProcessor:
         now_dt = dt.datetime.now(dt.timezone.utc)
         now_iso = now_dt.isoformat()
         stale_iso = (now_dt - dt.timedelta(minutes=10)).isoformat()
+        retry_cutoff_iso = (now_dt - dt.timedelta(seconds=self.retry_backoff_sec)).isoformat()
 
         with self.db.connect(immediate=True) as c:
             row = c.execute(
@@ -248,18 +251,33 @@ class HemorySegmentProcessor:
                    AND rs.vault_id = pc.vault_id
                 WHERE rs.upload_status = 'uploaded'
                   AND (
-                      pc.status = 'pending'
+                      (
+                          pc.status = 'pending'
+                          AND (
+                              pc.error_code IS NULL
+                              OR pc.error_code NOT LIKE 'RETRYABLE_%'
+                              OR pc.updated_at <= ?
+                          )
+                      )
                       OR (pc.status = 'running' AND pc.updated_at < ?)
                   )
                 ORDER BY rs.started_at ASC, rs.segment_index ASC
                 LIMIT 1
                 """,
-                (stale_iso,),
+                (retry_cutoff_iso, stale_iso),
             ).fetchone()
             if row is None:
                 return None
 
             d = dict(row)
+            prev_retry_count = 0
+            prev_err = str(d.get("error_code") or "")
+            if prev_err.startswith("RETRYABLE_"):
+                try:
+                    prev_retry_count = int(prev_err.split("_", 1)[1])
+                except ValueError:
+                    prev_retry_count = 0
+
             updated = c.execute(
                 """
                 UPDATE processing_chains
@@ -278,6 +296,7 @@ class HemorySegmentProcessor:
             "vault_id": d["vault_id"],
             "recording_id": d["recording_id"],
             "live_session_id": d.get("live_session_id"),
+            "retry_count": prev_retry_count,
         }
         seg = {
             "segment_id": d["segment_id"],
@@ -304,11 +323,25 @@ class HemorySegmentProcessor:
         except ProviderBlocked as exc:
             self._fail_chain(chain, str(exc), "ASR provider is not configured or blocked")
         except ProviderError as exc:
-            self._fail_chain(chain, str(exc), "Upstream ASR provider error")
+            attempt = int(chain.get("retry_count") or 0) + 1
+            if getattr(exc, "retryable", False) and attempt <= self.max_retries:
+                self._requeue_chain(chain, attempt, str(exc))
+            else:
+                self._fail_chain(chain, str(exc), "Upstream ASR provider error")
         except Exception as exc:
             logger.exception("Hemory segment processing failed for chain=%s", chain["chain_id"])
-            self._fail_chain(chain, f"PROCESSING_{type(exc).__name__}", "Internal audio processing error")
+            self._fail_chain(chain, f"PROCESSING_{type(exc).__name__}", str(exc) or "Internal audio processing error")
         return True
+
+    def _requeue_chain(self, chain: dict[str, Any], attempt: int, reason: str) -> None:
+        self.db.update_processing_chain(
+            chain_id=chain["chain_id"],
+            status="pending",
+            current_step="transcribing",
+            progress_pct=15.0,
+            error_code=f"RETRYABLE_{attempt}",
+            error_message=f"Retry {attempt}/{self.max_retries}: {reason}"[:240],
+        )
 
     def _fail_chain(self, chain: dict[str, Any], error_code: str, error_message: str) -> None:
         now_iso = dt.datetime.now(dt.timezone.utc).isoformat()
@@ -1448,6 +1481,23 @@ def refresh_vault_events_for_cluster(
     )
 
 
+def resolve_tzinfo(tz_name: str | None) -> tuple[dt.tzinfo, str]:
+    raw = (tz_name or "").strip() or "Asia/Shanghai"
+    m = re.match(r"^(?:UTC|GMT)?([+-])(\d{1,2})(?::?(\d{2}))?$", raw, flags=re.IGNORECASE)
+    if m:
+        sign = 1 if m.group(1) == "+" else -1
+        hours = int(m.group(2))
+        mins = int(m.group(3) or "0")
+        if hours <= 14 and mins < 60:
+            offset = dt.timedelta(minutes=sign * (hours * 60 + mins))
+            label = f"UTC{m.group(1)}{hours:02d}:{mins:02d}"
+            return dt.timezone(offset), label
+    try:
+        return ZoneInfo(raw), raw
+    except Exception:
+        return dt.timezone.utc, "UTC"
+
+
 def build_timeline_day_response(
     db: Database,
     vault_id: str,
@@ -1455,11 +1505,7 @@ def build_timeline_day_response(
     tz_name: str = "Asia/Shanghai",
 ) -> dict[str, Any]:
     """Assemble strictly ascending (`00:00 -> 24:00`) day timeline across P1..P4 tiers."""
-    try:
-        tz = ZoneInfo(tz_name)
-    except Exception:
-        tz = dt.timezone.utc
-        tz_name = "UTC"
+    tz, tz_name = resolve_tzinfo(tz_name)
 
     if date_str:
         try:
@@ -1823,10 +1869,7 @@ def get_memory_event_detail(
     if not ev:
         return None
 
-    try:
-        tz = ZoneInfo(tz_name)
-    except Exception:
-        tz = dt.timezone.utc
+    tz, _ = resolve_tzinfo(tz_name)
 
     ev_s_ms = int(parse_iso_utc(ev["start_time"]).timestamp() * 1000)
     ev_e_ms = int(parse_iso_utc(ev["end_time"]).timestamp() * 1000)

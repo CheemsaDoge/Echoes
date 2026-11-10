@@ -128,6 +128,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         raise HTTPException(status_code=403, detail="Header x-tenant-id does not match authenticated user")
                     user_id = user_row["user_id"]
                     tenant_id = user_row["tenant_id"]
+                else:
+                    path_tenant = request.path_params.get("tenant_id") or request.path_params.get("tenantId")
+                    if h_tenant and path_tenant and h_tenant != path_tenant:
+                        raise HTTPException(status_code=403, detail="Cross-tenant access forbidden")
+                    raise HTTPException(
+                        status_code=401,
+                        detail="Invalid bearer token",
+                        headers={"WWW-Authenticate": "Bearer"},
+                    )
 
             if not tenant_id and user_id:
                 u = db.get_user(user_id)
@@ -240,8 +249,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
         if cluster:
+            prev_spk_id = cluster.get("speaker_id")
+            cluster_samples = int(cluster.get("occurrences_count", 1))
             now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
             with db.connect(immediate=True) as c:
+                if prev_spk_id and prev_spk_id != new_spk_id:
+                    c.execute(
+                        "UPDATE speaker_profiles SET sample_count = MAX(0, sample_count - ?), updated_at = ? WHERE speaker_id = ? AND vault_id = ?",
+                        (cluster_samples, now_iso, prev_spk_id, vault_id),
+                    )
                 c.execute(
                     "UPDATE voiceprint_clusters SET status='enrolled', speaker_id=?, updated_at=? WHERE cluster_id=?",
                     (new_spk_id, now_iso, payload.cluster_id),
@@ -451,6 +467,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
         with db.connect(immediate=True) as conn:
+            tenant_row = conn.execute(
+                "SELECT tenant_id FROM tenants WHERE tenant_id = ?",
+                (tenant_id,),
+            ).fetchone()
+            if not tenant_row:
+                raise HTTPException(status_code=404, detail="Tenant not found")
+
+            vault_row = conn.execute(
+                "SELECT vault_id FROM vaults WHERE vault_id = ? AND tenant_id = ?",
+                (vault_id, tenant_id),
+            ).fetchone()
+            if not vault_row:
+                raise HTTPException(status_code=404, detail="Vault not found")
+
+            user_row = conn.execute(
+                "SELECT user_id FROM users WHERE user_id = ? AND tenant_id = ?",
+                (user_id, tenant_id),
+            ).fetchone()
+            if not user_row:
+                fallback_user = conn.execute(
+                    "SELECT user_id FROM users WHERE tenant_id = ? LIMIT 1",
+                    (tenant_id,),
+                ).fetchone()
+                if fallback_user and auth.get("is_admin"):
+                    user_id = fallback_user["user_id"]
+                else:
+                    raise HTTPException(status_code=404, detail="User not found")
+
             existing = conn.execute(
                 "SELECT * FROM dp_instances WHERE dp_instance_id = ?",
                 (payload.dp_instance_id,),
@@ -458,6 +502,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if existing:
                 if existing["vault_id"] != vault_id or existing["tenant_id"] != tenant_id:
                     raise HTTPException(status_code=403, detail="DP instance belongs to another vault")
+                if not auth.get("is_admin") and existing["user_id"] != user_id:
+                    raise HTTPException(status_code=403, detail="DP instance belongs to another user")
+                user_id = existing["user_id"]
                 conn.execute(
                     "UPDATE dp_instances SET dp_instance_name = ?, last_active_at = ?, updated_at = ? WHERE dp_instance_id = ?",
                     (payload.dp_instance_name, now_iso, now_iso, payload.dp_instance_id),

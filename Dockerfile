@@ -1,6 +1,10 @@
 FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 DATA_DIR=/data
-RUN groupadd --gid 10001 echoledger && useradd --uid 10001 --gid echoledger --create-home echoledger
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 echoledger \
+    && useradd --uid 10001 --gid echoledger --create-home echoledger
 WORKDIR /app
 COPY backend /app/backend
 COPY web /app/web

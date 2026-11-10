@@ -60,7 +60,7 @@ class LocalAtomicUploadQueue(
     fun pruneCompleted(cutoffMs: Long = clock() - (7 * 86_400_000L)): List<String> = synchronized(lock) {
         val toPrune = entriesMap.values.filter { entry ->
             val timestamp = if (entry.lastAttemptAtMs > 0L) entry.lastAttemptAtMs else entry.createdAtMs
-            entry.status == UploadEntryState.Completed && timestamp < cutoffMs
+            entry.status == UploadEntryState.Completed && entry.sidecarUploadedSynced && timestamp < cutoffMs
         }
 
         if (toPrune.isEmpty()) return emptyList()

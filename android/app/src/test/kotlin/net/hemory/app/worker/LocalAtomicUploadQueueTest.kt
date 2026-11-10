@@ -112,7 +112,7 @@ class LocalAtomicUploadQueueTest {
 
         val queue = LocalAtomicUploadQueue(queueFile, clock = { nowMs })
 
-        // Entry 1: Completed, older than 7 days -> SHOULD BE PRUNED
+        // Entry 1: Completed and synced, older than 7 days -> SHOULD BE PRUNED
         queue.enqueue(UploadQueueEntry(
             uploadId = "upl_old_completed",
             recordingId = "rec_old",
@@ -122,7 +122,8 @@ class LocalAtomicUploadQueueTest {
             metaPath = oldMeta.absolutePath,
             fileSizeBytes = 100L,
             createdAtMs = eightDaysAgo,
-            status = UploadEntryState.Completed
+            status = UploadEntryState.Completed,
+            sidecarUploadedSynced = true
         ))
 
         // Entry 2: Completed, newer than 7 days -> MUST BE RETAINED
@@ -135,7 +136,8 @@ class LocalAtomicUploadQueueTest {
             metaPath = "",
             fileSizeBytes = 100L,
             createdAtMs = twoDaysAgo,
-            status = UploadEntryState.Completed
+            status = UploadEntryState.Completed,
+            sidecarUploadedSynced = true
         ))
 
         // Entry 3: Pending, older than 7 days -> MUST BE RETAINED (not uploaded yet)
@@ -163,10 +165,26 @@ class LocalAtomicUploadQueueTest {
             fileSizeBytes = 100L,
             createdAtMs = tenDaysAgo,
             lastAttemptAtMs = twoDaysAgo,
-            status = UploadEntryState.Completed
+            status = UploadEntryState.Completed,
+            sidecarUploadedSynced = true
         ))
 
-        assertEquals(4, queue.list().size)
+        // Entry 5: Completed older than 7 days but sidecar not synced -> MUST BE RETAINED
+        val unsyncedAac = File(folder, "unsynced.aac").apply { writeText("audio_unsynced") }
+        queue.enqueue(UploadQueueEntry(
+            uploadId = "upl_old_completed_unsynced",
+            recordingId = "rec_unsynced",
+            tenantId = "t1",
+            vaultId = "v1",
+            filePath = unsyncedAac.absolutePath,
+            metaPath = "",
+            fileSizeBytes = 100L,
+            createdAtMs = eightDaysAgo,
+            status = UploadEntryState.Completed,
+            sidecarUploadedSynced = false
+        ))
+
+        assertEquals(5, queue.list().size)
 
         // Execute pruning with cutoff at now - 7 days
         val pruned = queue.pruneCompleted(cutoffMs = nowMs - (7 * 86_400_000L))
@@ -177,12 +195,14 @@ class LocalAtomicUploadQueueTest {
         assertFalse("Old audio file must be purged from disk", oldAac.exists())
         assertFalse("Old meta file must be purged from disk", oldMeta.exists())
 
-        // Entries 2, 3 and 4 must still exist in queue and on disk
+        // Entries 2, 3, 4 and 5 must still exist in queue and on disk
         assertNotNull(queue.get("upl_recent_completed"))
         assertNotNull(queue.get("upl_old_pending"))
         assertNotNull(queue.get("upl_delayed_uploaded"))
+        assertNotNull(queue.get("upl_old_completed_unsynced"))
         assertTrue("Recent audio file must remain", recentAac.exists())
         assertTrue("Pending audio file must remain", pendingAac.exists())
         assertTrue("Delayed uploaded audio file must remain", delayedUploadedAac.exists())
+        assertTrue("Unsynced audio file must remain", unsyncedAac.exists())
     }
 }

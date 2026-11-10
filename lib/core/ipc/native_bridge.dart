@@ -25,25 +25,43 @@ class Auth7Tuple {
   });
 
   factory Auth7Tuple.fromMap(Map<String, dynamic> map) {
-    const requiredKeys = [
+    const stringKeys = [
       'accessToken',
       'refreshToken',
-      'expiresAt',
       'baseUrl',
       'slotConnectionType',
       'slotDpUnitId',
       'slotTenantId',
     ];
-    for (final key in requiredKeys) {
+
+    for (final key in stringKeys) {
       if (!map.containsKey(key) || map[key] == null) {
         throw ArgumentError('Missing required Auth7Tuple key: $key');
       }
+      final val = map[key];
+      if (val is! String || val.isEmpty) {
+        throw ArgumentError('Auth7Tuple field "$key" must be a non-empty String (got: $val)');
+      }
+    }
+
+    if (!map.containsKey('expiresAt') || map['expiresAt'] == null) {
+      throw ArgumentError('Missing required Auth7Tuple key: expiresAt');
+    }
+
+    final expiresAtVal = map['expiresAt'];
+    if (expiresAtVal is! num || !expiresAtVal.isFinite) {
+      throw ArgumentError('Auth7Tuple field "expiresAt" must be a positive number (got: $expiresAtVal)');
+    }
+
+    final expiresAt = expiresAtVal.toInt();
+    if (expiresAt <= 0) {
+      throw ArgumentError('Auth7Tuple field "expiresAt" must be positive > 0 (got: $expiresAt)');
     }
 
     return Auth7Tuple(
       accessToken: map['accessToken'] as String,
       refreshToken: map['refreshToken'] as String,
-      expiresAt: (map['expiresAt'] as num).toInt(),
+      expiresAt: expiresAt,
       baseUrl: map['baseUrl'] as String,
       slotConnectionType: map['slotConnectionType'] as String,
       slotDpUnitId: map['slotDpUnitId'] as String,
@@ -99,7 +117,7 @@ class NativeBridgeChannel implements INativeBridge {
     String userId = '',
   }) async {
     if (_invoker != null) {
-      final res = await _invoker!('startRecording', {
+      final res = await _invoker('startRecording', {
         'recordingId': recordingId,
         'tenantId': tenantId,
         'vaultId': vaultId,
@@ -114,7 +132,7 @@ class NativeBridgeChannel implements INativeBridge {
   @override
   Future<bool> stopRecording({String reason = 'userStop'}) async {
     if (_invoker != null) {
-      final res = await _invoker!('stopRecording', {'reason': reason});
+      final res = await _invoker('stopRecording', {'reason': reason});
       return (res as bool?) ?? false;
     }
     _state = 'stopped';
@@ -124,7 +142,7 @@ class NativeBridgeChannel implements INativeBridge {
   @override
   Future<bool> pauseRecording() async {
     if (_invoker != null) {
-      final res = await _invoker!('pauseRecording');
+      final res = await _invoker('pauseRecording');
       return (res as bool?) ?? false;
     }
     _state = 'paused';
@@ -134,7 +152,7 @@ class NativeBridgeChannel implements INativeBridge {
   @override
   Future<bool> resumeRecording() async {
     if (_invoker != null) {
-      final res = await _invoker!('resumeRecording');
+      final res = await _invoker('resumeRecording');
       return (res as bool?) ?? false;
     }
     _state = 'recording';
@@ -144,7 +162,7 @@ class NativeBridgeChannel implements INativeBridge {
   @override
   Future<String> getRecordingState() async {
     if (_invoker != null) {
-      final res = await _invoker!('getRecordingState');
+      final res = await _invoker('getRecordingState');
       return (res as String?) ?? 'idle';
     }
     return _state;
@@ -153,7 +171,7 @@ class NativeBridgeChannel implements INativeBridge {
   @override
   Future<bool> storeAuth(Auth7Tuple auth) async {
     if (_invoker != null) {
-      final res = await _invoker!('storeAuth', auth.toMap());
+      final res = await _invoker('storeAuth', auth.toMap());
       return (res as bool?) ?? false;
     }
     _auth = auth;
@@ -163,7 +181,7 @@ class NativeBridgeChannel implements INativeBridge {
   @override
   Future<Auth7Tuple?> getAuth() async {
     if (_invoker != null) {
-      final res = await _invoker!('getAuth');
+      final res = await _invoker('getAuth');
       if (res is Map<String, dynamic>) {
         return Auth7Tuple.fromMap(res);
       }
@@ -175,7 +193,7 @@ class NativeBridgeChannel implements INativeBridge {
   @override
   Future<bool> clearAuth() async {
     if (_invoker != null) {
-      final res = await _invoker!('clearAuth');
+      final res = await _invoker('clearAuth');
       return (res as bool?) ?? false;
     }
     _auth = null;
@@ -185,7 +203,7 @@ class NativeBridgeChannel implements INativeBridge {
   @override
   Future<bool> signOutAuth() async {
     if (_invoker != null) {
-      final res = await _invoker!('signOutAuth');
+      final res = await _invoker('signOutAuth');
       return (res as bool?) ?? false;
     }
     _auth = null;

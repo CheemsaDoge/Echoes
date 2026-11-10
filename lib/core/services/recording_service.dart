@@ -241,6 +241,25 @@ class RecordingService extends StateNotifier<RecordingSessionState> {
   }
 
   void _onNativeStateEvent(RecordingCaptureState nativeState, int elapsedMs) {
+    // If the state machine is already in failedTerminal, ignore all non-terminal events
+    // and never resurrect or clobber the terminal failure state.
+    if (state.captureState == RecordingCaptureState.failedTerminal) {
+      if (nativeState == RecordingCaptureState.failedTerminal) {
+        handleFatalError('NATIVE_TERMINAL_FAILURE');
+      }
+      return;
+    }
+
+    // In stopping, stopped, or idle states, ignore late recording or recovering events.
+    if (state.captureState == RecordingCaptureState.stopping ||
+        state.captureState == RecordingCaptureState.stopped ||
+        state.captureState == RecordingCaptureState.idle) {
+      if (nativeState == RecordingCaptureState.recording ||
+          nativeState == RecordingCaptureState.recovering) {
+        return;
+      }
+    }
+
     if (nativeState == RecordingCaptureState.recording) {
       _cancelWatchdogs();
       if (state.captureState != RecordingCaptureState.recording) {

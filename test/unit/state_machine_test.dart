@@ -280,5 +280,44 @@ Future<void> main() async {
     print('  [PASS] Test 5: Illegal state transitions strictly rejected');
   }
 
+  // Test 6: Late native state events cannot resurrect terminal/stopping/idle states
+  {
+    final mockBridge = MockNativeBridge();
+    final mockStreams = MockEventStreams();
+    final service = RecordingService(bridge: mockBridge, streams: mockStreams);
+
+    // Idle state: late recording/recovering event ignored
+    mockStreams.eventsCtrl.add(
+      const RecordingLifecycleEvent(type: 'STATE_CHANGED', payload: {'state': 'recording'}),
+    );
+    await Future.delayed(const Duration(milliseconds: 20));
+    assertEqual(service.state.captureState, RecordingCaptureState.idle, 'Idle ignored late recording event');
+
+    // Enter activating -> failedTerminal
+    await service.startRecording(recordingId: 'rec_term', tenantId: 't', vaultId: 'v');
+    service.handleFatalError('CRITICAL_HAL_FAULT');
+    assertEqual(service.state.captureState, RecordingCaptureState.failedTerminal, 'In failedTerminal');
+
+    // Late recording/recovering/stopped events must not resurrect or clobber failedTerminal
+    mockStreams.eventsCtrl.add(
+      const RecordingLifecycleEvent(type: 'STATE_CHANGED', payload: {'state': 'recording'}),
+    );
+    await Future.delayed(const Duration(milliseconds: 20));
+    assertEqual(service.state.captureState, RecordingCaptureState.failedTerminal, 'failedTerminal resists recording resurrection');
+
+    mockStreams.eventsCtrl.add(
+      const RecordingLifecycleEvent(type: 'STATE_CHANGED', payload: {'state': 'stopped'}),
+    );
+    await Future.delayed(const Duration(milliseconds: 20));
+    assertEqual(service.state.captureState, RecordingCaptureState.failedTerminal, 'failedTerminal resists stopped clobber');
+
+    service.reset();
+    assertEqual(service.state.captureState, RecordingCaptureState.idle, 'Reset restores idle');
+
+    service.dispose();
+    mockStreams.dispose();
+    print('  [PASS] Test 6: Late native state events cannot resurrect terminal or inactive states');
+  }
+
   print('\nALL STATE MACHINE TESTS (hf.i) PASSED SUCCESSFULLY!');
 }

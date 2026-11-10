@@ -50,6 +50,40 @@ void main() {
       }
       assertTrue(threw, 'Missing key $missingKey must throw ArgumentError');
     }
+
+    // Type validation: non-string in string fields
+    for (final strKey in ['accessToken', 'refreshToken', 'baseUrl', 'slotConnectionType', 'slotDpUnitId', 'slotTenantId']) {
+      final wrongTypeMap = Map<String, dynamic>.from(validMap)..[strKey] = 12345;
+      bool threw = false;
+      try {
+        Auth7Tuple.fromMap(wrongTypeMap);
+      } on ArgumentError {
+        threw = true;
+      }
+      assertTrue(threw, 'Non-string value for $strKey must throw ArgumentError');
+
+      final emptyStrMap = Map<String, dynamic>.from(validMap)..[strKey] = '';
+      bool threwEmpty = false;
+      try {
+        Auth7Tuple.fromMap(emptyStrMap);
+      } on ArgumentError {
+        threwEmpty = true;
+      }
+      assertTrue(threwEmpty, 'Empty string for $strKey must throw ArgumentError');
+    }
+
+    // Timestamp validation: zero and negative timestamps
+    for (final invalidTs in [0, -1, -100]) {
+      final invalidTsMap = Map<String, dynamic>.from(validMap)..['expiresAt'] = invalidTs;
+      bool threw = false;
+      try {
+        Auth7Tuple.fromMap(invalidTsMap);
+      } on ArgumentError {
+        threw = true;
+      }
+      assertTrue(threw, 'Timestamp $invalidTs must throw ArgumentError');
+    }
+
     print('  [PASS] Test 1: Complete Auth7Tuple serialization and 7-field guard');
   }
 

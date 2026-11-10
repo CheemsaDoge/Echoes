@@ -151,7 +151,22 @@ class LocalAtomicUploadQueueTest {
             status = UploadEntryState.Pending
         ))
 
-        assertEquals(3, queue.list().size)
+        // Entry 4: Created 10 days ago, but uploaded 2 days ago -> MUST BE RETAINED
+        val delayedUploadedAac = File(folder, "delayed.aac").apply { writeText("audio_delayed") }
+        queue.enqueue(UploadQueueEntry(
+            uploadId = "upl_delayed_uploaded",
+            recordingId = "rec_delayed",
+            tenantId = "t1",
+            vaultId = "v1",
+            filePath = delayedUploadedAac.absolutePath,
+            metaPath = "",
+            fileSizeBytes = 100L,
+            createdAtMs = tenDaysAgo,
+            lastAttemptAtMs = twoDaysAgo,
+            status = UploadEntryState.Completed
+        ))
+
+        assertEquals(4, queue.list().size)
 
         // Execute pruning with cutoff at now - 7 days
         val pruned = queue.pruneCompleted(cutoffMs = nowMs - (7 * 86_400_000L))
@@ -162,10 +177,12 @@ class LocalAtomicUploadQueueTest {
         assertFalse("Old audio file must be purged from disk", oldAac.exists())
         assertFalse("Old meta file must be purged from disk", oldMeta.exists())
 
-        // Entries 2 and 3 must still exist in queue and on disk
+        // Entries 2, 3 and 4 must still exist in queue and on disk
         assertNotNull(queue.get("upl_recent_completed"))
         assertNotNull(queue.get("upl_old_pending"))
+        assertNotNull(queue.get("upl_delayed_uploaded"))
         assertTrue("Recent audio file must remain", recentAac.exists())
         assertTrue("Pending audio file must remain", pendingAac.exists())
+        assertTrue("Delayed uploaded audio file must remain", delayedUploadedAac.exists())
     }
 }

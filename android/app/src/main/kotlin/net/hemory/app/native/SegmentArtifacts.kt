@@ -110,10 +110,12 @@ class SegmentFileSink(
             out.flush()
             runCatching { out.fd.sync() }
         }
-        if (metaFile.exists()) {
-            metaFile.delete()
+        if (!tmpMeta.renameTo(metaFile)) {
+            if (metaFile.exists()) {
+                metaFile.delete()
+            }
+            tmpMeta.renameTo(metaFile)
         }
-        tmpMeta.renameTo(metaFile)
 
         return SegmentArtifacts(
             recordingId = recordingId,
@@ -224,9 +226,11 @@ class SegmentManifestManager private constructor(
             fos.flush()
             runCatching { fos.fd.sync() }
         }
-        if (manifestFile.exists()) {
-            manifestFile.delete()
+        if (!tmpFile.renameTo(manifestFile)) {
+            if (manifestFile.exists()) {
+                manifestFile.delete()
+            }
+            tmpFile.renameTo(manifestFile)
         }
-        tmpFile.renameTo(manifestFile)
     }
 }

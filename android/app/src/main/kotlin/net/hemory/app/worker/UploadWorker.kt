@@ -189,7 +189,7 @@ class UploadWorker(
             httpClient.newCall(request).execute().use { response ->
                 val body = response.body?.string().orEmpty()
                 when (response.code) {
-                    201 -> {
+                    in 200..201 -> {
                         val json = runCatching { JSONObject(body) }.getOrDefault(JSONObject())
                         val artifactId = json.optString("asset_id", json.optString("recording_id", ""))
                         Log.i("UploadWorker", "doWork: Successfully uploaded uploadId=$uploadId, assetId=$artifactId")

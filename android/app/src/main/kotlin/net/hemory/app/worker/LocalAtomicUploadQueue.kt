@@ -59,8 +59,8 @@ class LocalAtomicUploadQueue(
      */
     fun pruneCompleted(cutoffMs: Long = clock() - (7 * 86_400_000L)): List<String> = synchronized(lock) {
         val toPrune = entriesMap.values.filter { entry ->
-            entry.status == UploadEntryState.Completed &&
-            entry.createdAtMs < cutoffMs
+            val timestamp = if (entry.lastAttemptAtMs > 0L) entry.lastAttemptAtMs else entry.createdAtMs
+            entry.status == UploadEntryState.Completed && timestamp < cutoffMs
         }
 
         if (toPrune.isEmpty()) return emptyList()
@@ -91,7 +91,17 @@ class LocalAtomicUploadQueue(
     fun load() {
         synchronized(lock) {
             entriesMap.clear()
-            if (!queueFile.exists()) return
+            if (!queueFile.exists()) {
+                val tmpFile = File(queueFile.parentFile, "${queueFile.name}.tmp")
+                if (tmpFile.exists()) {
+                    if (!tmpFile.renameTo(queueFile)) {
+                        queueFile.delete()
+                        tmpFile.renameTo(queueFile)
+                    }
+                } else {
+                    return
+                }
+            }
 
             try {
                 val content = queueFile.readText(Charsets.UTF_8).trim()
@@ -142,12 +152,14 @@ class LocalAtomicUploadQueue(
                 runCatching { fos.fd.sync() }
             }
 
-            if (queueFile.exists()) {
-                queueFile.delete()
-            }
-
+            // Atomically replace target file without pre-delete race window
             if (!tmpFile.renameTo(queueFile)) {
-                throw IOException("renameTo failed: ${tmpFile.path} -> ${queueFile.path}")
+                if (queueFile.exists()) {
+                    queueFile.delete()
+                }
+                if (!tmpFile.renameTo(queueFile)) {
+                    throw IOException("renameTo failed: ${tmpFile.path} -> ${queueFile.path}")
+                }
             }
             return true
         } catch (e: Exception) {

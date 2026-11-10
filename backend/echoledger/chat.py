@@ -152,15 +152,37 @@ def execute_tool_call(
     start_time = time.time()
     query = arguments.get("query", "")
 
-    if tool_name == "search_sections":
-        session_id = arguments.get("session_id")
-        speaker_id = arguments.get("speaker_id")
-        limit = int(arguments.get("limit") or 20)
-        sections = db.search_sections(
+    try:
+        if tool_name == "search_sections":
+            session_id = arguments.get("session_id")
+            speaker_id = arguments.get("speaker_id")
+            limit = int(arguments.get("limit") or 20)
+            sections = db.search_sections(
+                vault_id=vault_id,
+                query=query,
+                session_id=session_id,
+                speaker_id=speaker_id,
+                limit=limit,
+            )
+            elapsed_ms = int((time.time() - start_time) * 1000)
+            return {
+                "status": "completed",
+                "elapsed_ms": elapsed_ms,
+                "result": {
+                    "matches_count": len(sections),
+                    "sections": sections,
+                },
+            }
+
+        # Default to search_memory
+        date_from = arguments.get("date_from")
+        date_to = arguments.get("date_to")
+        limit = int(arguments.get("limit") or 10)
+        memories = db.search_memory(
             vault_id=vault_id,
             query=query,
-            session_id=session_id,
-            speaker_id=speaker_id,
+            date_from=date_from,
+            date_to=date_to,
             limit=limit,
         )
         elapsed_ms = int((time.time() - start_time) * 1000)
@@ -168,32 +190,25 @@ def execute_tool_call(
             "status": "completed",
             "elapsed_ms": elapsed_ms,
             "result": {
-                "matches_count": len(sections),
-                "sections": sections,
+                "matches_count": len(memories),
+                "memories": memories,
+                "snippet": memories[0]["snippet"] if memories else "No matching memories found.",
             },
         }
-
-    # Default to search_memory
-    date_from = arguments.get("date_from")
-    date_to = arguments.get("date_to")
-    limit = int(arguments.get("limit") or 10)
-    memories = db.search_memory(
-        vault_id=vault_id,
-        query=query,
-        date_from=date_from,
-        date_to=date_to,
-        limit=limit,
-    )
-    elapsed_ms = int((time.time() - start_time) * 1000)
-    return {
-        "status": "completed",
-        "elapsed_ms": elapsed_ms,
-        "result": {
-            "matches_count": len(memories),
-            "memories": memories,
-            "snippet": memories[0]["snippet"] if memories else f"No memories found matching '{query}'",
-        },
-    }
+    except Exception as exc:
+        logger.warning("Tool call %s failed for vault_id=%s, query=%r: %s", tool_name, vault_id, query, exc)
+        elapsed_ms = int((time.time() - start_time) * 1000)
+        return {
+            "status": "error",
+            "elapsed_ms": elapsed_ms,
+            "result": {
+                "matches_count": 0,
+                "sections": [] if tool_name == "search_sections" else [],
+                "memories": [] if tool_name == "search_memory" else [],
+                "snippet": "No matching memories found.",
+                "error": str(exc),
+            },
+        }
 
 
 # -----------------------------------------------------------------------------
@@ -218,7 +233,7 @@ class SyntheticGeminiAgent:
     ) -> None:
         """Executes the full cognitive turn lifecycle into the buffer."""
         # Check if cancelled before starting
-        if buffer.is_cancelled:
+        if buffer.is_cancelled or buffer.is_completed:
             return
 
         # 1. Phase: Recalling
@@ -231,7 +246,7 @@ class SyntheticGeminiAgent:
         )
         await asyncio.sleep(0.001)
 
-        if buffer.is_cancelled:
+        if buffer.is_cancelled or buffer.is_completed:
             return
 
         # Cognitive Tool Selection
@@ -243,12 +258,15 @@ class SyntheticGeminiAgent:
             for w in ["said", "quote", "exact words", "hear", "transcription", "speak", "talking", "transcript"]
         )
 
+        query_tokens = re.findall(r"\w+", prompt, flags=re.UNICODE)
+        search_query = " ".join(query_tokens) if query_tokens else prompt
+
         if is_transcript_inquiry:
             tool_name = "search_sections"
-            args = {"query": prompt, "limit": 20}
+            args = {"query": search_query, "limit": 20}
         else:
             tool_name = "search_memory"
-            args = {"query": prompt, "limit": 10}
+            args = {"query": search_query, "limit": 10}
 
         # 2. Phase: Executing Tool
         buffer.append_event(
@@ -262,11 +280,15 @@ class SyntheticGeminiAgent:
         )
         await asyncio.sleep(0.001)
 
-        if buffer.is_cancelled:
+        if buffer.is_cancelled or buffer.is_completed:
             return
 
         # Execute real SQLite database query scoped to caller's vault
         tool_out = execute_tool_call(self.db, vault_id, tool_name, args)
+
+        # Check cancellation before appending tool_call_completed
+        if buffer.is_cancelled or buffer.is_completed:
+            return
 
         buffer.append_event(
             "tool_call_completed",
@@ -280,7 +302,7 @@ class SyntheticGeminiAgent:
         )
         await asyncio.sleep(0.001)
 
-        if buffer.is_cancelled:
+        if buffer.is_cancelled or buffer.is_completed:
             return
 
         # 3. Phase: Summarizing
@@ -293,7 +315,7 @@ class SyntheticGeminiAgent:
         )
         await asyncio.sleep(0.001)
 
-        if buffer.is_cancelled:
+        if buffer.is_cancelled or buffer.is_completed:
             return
 
         # Grounded text response synthesis
@@ -307,13 +329,13 @@ class SyntheticGeminiAgent:
             top = res_data["memories"][0]
             full_text = f'Based on your recorded memory "{top.get("title")}": {top.get("snippet")}.'
         else:
-            full_text = f"Based on your ambient audio journal, no matching events were recorded for: '{prompt}'."
+            full_text = "Based on your ambient audio journal, no matching events or conversations were recorded in your timeline."
 
         # Stream text deltas in chunks
         words = full_text.split(" ")
         chunk_size = 4
         for i in range(0, len(words), chunk_size):
-            if buffer.is_cancelled:
+            if buffer.is_cancelled or buffer.is_completed:
                 return
             delta = " ".join(words[i : i + chunk_size]) + (" " if i + chunk_size < len(words) else "")
             buffer.append_event(
@@ -324,7 +346,7 @@ class SyntheticGeminiAgent:
             )
             await asyncio.sleep(0.001)
 
-        if buffer.is_cancelled:
+        if buffer.is_cancelled or buffer.is_completed:
             return
 
         # 4. Phase: Turn Completed
@@ -347,6 +369,7 @@ class SyntheticGeminiAgent:
                 response_text=full_text,
                 tokens_used=tokens_est,
                 completed_at=completed_at,
+                vault_id=vault_id,
             )
         except Exception as e:
             logger.warning("Could not update turn in DB: %s", e)
@@ -380,6 +403,9 @@ class GeminiChatAgent:
             await self.mock_fallback.execute_turn(buffer, prompt, vault_id, user_id, client_context)
             return
 
+        if buffer.is_cancelled or buffer.is_completed:
+            return
+
         # Check if google-genai is importable
         try:
             from google import genai
@@ -390,6 +416,9 @@ class GeminiChatAgent:
 
             # Signal recalling phase
             buffer.append_event("turn_progress", {"phase": "recalling", "message": "Searching your memory timeline"})
+
+            if buffer.is_cancelled or buffer.is_completed:
+                return
 
             # Cognitive tool calling with Gemini
             tools = [types.Tool(function_declarations=AVAILABLE_TOOLS)]
@@ -406,6 +435,9 @@ class GeminiChatAgent:
                 contents=prompt,
                 config=config,
             )
+
+            if buffer.is_cancelled or buffer.is_completed:
+                return
 
             # Check for function/tool call
             tool_calls = response.function_calls if hasattr(response, "function_calls") else None
@@ -425,7 +457,13 @@ class GeminiChatAgent:
                     },
                 )
 
+                if buffer.is_cancelled or buffer.is_completed:
+                    return
+
                 tool_out = execute_tool_call(self.db, vault_id, tool_name, tool_args)
+
+                if buffer.is_cancelled or buffer.is_completed:
+                    return
 
                 buffer.append_event(
                     "tool_call_completed",
@@ -438,11 +476,15 @@ class GeminiChatAgent:
                     },
                 )
 
+                if buffer.is_cancelled or buffer.is_completed:
+                    return
+
                 # Summarizing phase
                 buffer.append_event("turn_progress", {"phase": "summarizing", "message": "Formulating episodic response"})
 
                 # Final synthesis turn
-                follow_up = client.models.generate_content(
+                follow_up = await asyncio.to_thread(
+                    client.models.generate_content,
                     model=self.model,
                     contents=[
                         types.Content(role="user", parts=[types.Part.from_text(text=prompt)]),
@@ -451,6 +493,10 @@ class GeminiChatAgent:
                     ],
                     config=types.GenerateContentConfig(system_instruction=system_instruction),
                 )
+
+                if buffer.is_cancelled or buffer.is_completed:
+                    return
+
                 final_text = follow_up.text or "Completed memory recall."
             else:
                 buffer.append_event("turn_progress", {"phase": "summarizing", "message": "Formulating episodic response"})
@@ -460,11 +506,14 @@ class GeminiChatAgent:
             words = final_text.split(" ")
             chunk_size = 4
             for i in range(0, len(words), chunk_size):
-                if buffer.is_cancelled:
+                if buffer.is_cancelled or buffer.is_completed:
                     return
                 delta = " ".join(words[i : i + chunk_size]) + (" " if i + chunk_size < len(words) else "")
                 buffer.append_event("text_delta", {"delta": delta})
                 await asyncio.sleep(0.001)
+
+            if buffer.is_cancelled or buffer.is_completed:
+                return
 
             tokens = max(24, len(final_text) // 3)
             completed_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -476,6 +525,7 @@ class GeminiChatAgent:
                 response_text=final_text,
                 tokens_used=tokens,
                 completed_at=completed_at,
+                vault_id=vault_id,
             )
 
         except Exception as exc:

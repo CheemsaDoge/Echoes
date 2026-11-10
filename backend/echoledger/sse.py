@@ -77,7 +77,11 @@ class TurnEventBuffer:
         self.completed_at: float | None = None
         self._subscribers: set[asyncio.Queue[BufferedEvent | None]] = set()
 
-    def append_event(self, event_type: str, data: dict[str, Any]) -> BufferedEvent:
+    def append_event(self, event_type: str, data: dict[str, Any]) -> BufferedEvent | None:
+        if self.is_completed:
+            # Strictly reject trailing events after terminal completion/failure
+            return None
+
         seq = self.next_seq
         self.next_seq += 1
         event_id = f"{self.turn_id}_{seq:03d}"
@@ -178,20 +182,31 @@ class TurnStreamManager:
         self._buffers: dict[str, TurnEventBuffer] = {}
         self._cancellations: set[str] = set()
         self._expired_turns: set[str] = set()
+        self._executing_tasks: dict[str, asyncio.Task] = {}
 
     def get_or_create(self, turn_id: str, thread_id: str) -> TurnEventBuffer:
         self.cleanup()
         if turn_id not in self._buffers:
-            self._buffers[turn_id] = TurnEventBuffer(
+            buf = TurnEventBuffer(
                 turn_id=turn_id,
                 thread_id=thread_id,
                 retention_seconds=self.retention_seconds,
             )
+            if turn_id in self._cancellations:
+                buf.mark_cancelled()
+            self._buffers[turn_id] = buf
         return self._buffers[turn_id]
 
     def get(self, turn_id: str) -> TurnEventBuffer | None:
         self.cleanup()
         return self._buffers.get(turn_id)
+
+    def is_executing(self, turn_id: str) -> bool:
+        task = self._executing_tasks.get(turn_id)
+        return task is not None and not task.done()
+
+    def set_executing_task(self, turn_id: str, task: asyncio.Task) -> None:
+        self._executing_tasks[turn_id] = task
 
     def is_expired_turn(self, turn_id: str) -> bool:
         self.cleanup()
@@ -200,10 +215,15 @@ class TurnStreamManager:
     def mark_expired(self, turn_id: str) -> None:
         if turn_id in self._buffers:
             del self._buffers[turn_id]
+        if turn_id in self._executing_tasks:
+            del self._executing_tasks[turn_id]
         self._expired_turns.add(turn_id)
 
     def cancel(self, turn_id: str) -> None:
         self._cancellations.add(turn_id)
+        task = self._executing_tasks.get(turn_id)
+        if task and not task.done():
+            task.cancel()
         buf = self._buffers.get(turn_id)
         if buf and not buf.is_completed:
             buf.mark_cancelled()
@@ -216,4 +236,6 @@ class TurnStreamManager:
         expired = [tid for tid, buf in self._buffers.items() if buf.is_expired(now)]
         for tid in expired:
             del self._buffers[tid]
+            if tid in self._executing_tasks:
+                del self._executing_tasks[tid]
             self._expired_turns.add(tid)

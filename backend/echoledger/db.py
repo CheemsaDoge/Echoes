@@ -75,6 +75,12 @@ def uid() -> str:
 def emit(conn: sqlite3.Connection, kind: str, entity_id: str) -> None:
     conn.execute("INSERT INTO changes(kind,entity_id,created_ms) VALUES(?,?,?)", (kind, entity_id, now_ms()))
 
+def sanitize_fts_tokens(query: str) -> list[str]:
+    """Extract clean, safe alphanumeric and unicode tokens for SQLite FTS5 MATCH queries."""
+    sanitized = "".join(ch for ch in query if ch.isprintable() and ch != "\x00")
+    tokens = re.findall(r"\w+", sanitized, flags=re.UNICODE)
+    return [t.strip()[:128] for t in tokens if t.strip()][:32]
+
 class Database:
     def __init__(self, root: Path):
         self.root = Path(root)
@@ -826,19 +832,58 @@ class Database:
         client_context: dict | str | None = None,
         status: str = "pending",
     ) -> dict:
-        if turn_index is None:
-            turn_index = self.get_next_turn_index(thread_id)
         ctx_str = json.dumps(client_context) if isinstance(client_context, dict) else (client_context or "{}")
         now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
         with self.connect(immediate=True) as c:
-            c.execute(
-                """INSERT INTO chat_turns (
-                       turn_id, thread_id, tenant_id, vault_id, turn_index,
-                       prompt, response_text, status, tokens_used,
-                       client_turn_id, client_context, created_at
-                   ) VALUES (?, ?, ?, ?, ?, ?, '', ?, 0, ?, ?, ?)""",
-                (turn_id, thread_id, tenant_id, vault_id, turn_index, prompt, status, client_turn_id, ctx_str, now_iso),
-            )
+            # Check if turn_id was already inserted by a racing request
+            cursor = c.execute("SELECT * FROM chat_turns WHERE turn_id = ?", (turn_id,))
+            row = cursor.fetchone()
+            if row:
+                d = dict(row)
+                return self.get_chat_turn(turn_id, vault_id) or d
+
+            if turn_index is None:
+                cursor = c.execute(
+                    "SELECT COALESCE(MAX(turn_index), 0) + 1 AS next_idx FROM chat_turns WHERE thread_id = ?",
+                    (thread_id,),
+                )
+                r_idx = cursor.fetchone()
+                turn_index = int(r_idx["next_idx"]) if r_idx else 1
+
+            try:
+                c.execute(
+                    """INSERT INTO chat_turns (
+                           turn_id, thread_id, tenant_id, vault_id, turn_index,
+                           prompt, response_text, status, tokens_used,
+                           client_turn_id, client_context, created_at
+                       ) VALUES (?, ?, ?, ?, ?, ?, '', ?, 0, ?, ?, ?)""",
+                    (turn_id, thread_id, tenant_id, vault_id, turn_index, prompt, status, client_turn_id, ctx_str, now_iso),
+                )
+            except sqlite3.IntegrityError:
+                # Race condition recovery: check if turn_id exists
+                cursor = c.execute("SELECT * FROM chat_turns WHERE turn_id = ?", (turn_id,))
+                row = cursor.fetchone()
+                if row:
+                    d = dict(row)
+                    return self.get_chat_turn(turn_id, vault_id) or d
+
+                # Conflict on (thread_id, turn_index) with distinct turn_id: recompute turn_index
+                cursor = c.execute(
+                    "SELECT COALESCE(MAX(turn_index), 0) + 1 AS next_idx FROM chat_turns WHERE thread_id = ?",
+                    (thread_id,),
+                )
+                r_idx = cursor.fetchone()
+                new_turn_index = int(r_idx["next_idx"]) if r_idx else 1
+                c.execute(
+                    """INSERT INTO chat_turns (
+                           turn_id, thread_id, tenant_id, vault_id, turn_index,
+                           prompt, response_text, status, tokens_used,
+                           client_turn_id, client_context, created_at
+                       ) VALUES (?, ?, ?, ?, ?, ?, '', ?, 0, ?, ?, ?)""",
+                    (turn_id, thread_id, tenant_id, vault_id, new_turn_index, prompt, status, client_turn_id, ctx_str, now_iso),
+                )
+
         return self.get_chat_turn(turn_id, vault_id)
 
     def get_chat_turn(self, turn_id: str, vault_id: str | None = None) -> dict | None:
@@ -864,6 +909,7 @@ class Database:
         error_code: str | None = None,
         error_message: str | None = None,
         completed_at: str | None = None,
+        vault_id: str | None = None,
     ) -> None:
         updates = []
         params = []
@@ -891,13 +937,25 @@ class Database:
 
         sql = f"UPDATE chat_turns SET {', '.join(updates)} WHERE turn_id = ?"
         params.append(turn_id)
+        if vault_id is not None:
+            sql += " AND vault_id = ?"
+            params.append(vault_id)
         with self.connect(immediate=True) as c:
             c.execute(sql, tuple(params))
 
-    def update_chat_turn_status(self, turn_id: str, status: str) -> None:
+    def update_chat_turn_status(self, turn_id: str, status: str, vault_id: str | None = None) -> None:
         now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
         with self.connect(immediate=True) as c:
-            c.execute("UPDATE chat_turns SET status = ?, completed_at = ? WHERE turn_id = ?", (status, now_iso, turn_id))
+            if vault_id:
+                c.execute(
+                    "UPDATE chat_turns SET status = ?, completed_at = ? WHERE turn_id = ? AND vault_id = ?",
+                    (status, now_iso, turn_id, vault_id),
+                )
+            else:
+                c.execute(
+                    "UPDATE chat_turns SET status = ?, completed_at = ? WHERE turn_id = ?",
+                    (status, now_iso, turn_id),
+                )
 
     # -------------------------------------------------------------------------
     # Milestone M4: Processing Chains (Feature F4.4, P1 Timeline Clipping)
@@ -1126,25 +1184,28 @@ class Database:
     ) -> list[dict]:
         from .speakers import SessionSpeakerResolver
 
-        cleaned = re.sub(r'["*():^{}\[\]~]', ' ', query)
-        tokens = [t.strip() for t in cleaned.split() if t.strip()]
-        fts_term = " ".join(f'"{t}"' for t in tokens) if tokens else query
-        like_pat = f"%{query.strip()}%"
+        clean_query = "".join(ch for ch in query if ch.isprintable() and ch != "\x00").strip()
+        if not clean_query:
+            return []
+
+        tokens = sanitize_fts_tokens(clean_query)
+        fts_term = " ".join(f'"{t}"' for t in tokens) if tokens else None
+        like_pat = f"%{clean_query}%"
 
         # Contract C6 Speaker Fallback Resolution
         profiles_rows = self.all("SELECT speaker_id, name, suspected_name FROM speaker_profiles WHERE vault_id = ?", (vault_id,))
         profiles_map = {r["speaker_id"]: dict(r) for r in profiles_rows}
         resolver = SessionSpeakerResolver(speaker_profiles=profiles_map)
 
-        sql = """
+        sql_fts = """
         SELECT sm.message_id, sm.section_id, sm.speaker_id, sm.cluster_id, sm.speaker_name,
                sm.content, sm.start_ms, sm.end_ms, sm.confidence,
                s.live_session_id AS session_id, s.title AS section_title,
                rs.started_at AS session_started_at
         FROM section_messages sm
-        LEFT JOIN sections s ON sm.section_id = s.section_id
+        INNER JOIN sections s ON sm.section_id = s.section_id
         LEFT JOIN recording_sessions rs ON s.live_session_id = rs.live_session_id
-        WHERE (s.vault_id = ? OR (s.vault_id IS NULL AND (SELECT vault_id FROM recording_sessions WHERE live_session_id = s.live_session_id) = ?))
+        WHERE s.vault_id = ?
           AND (? IS NULL OR s.live_session_id = ?)
           AND (? IS NULL OR sm.speaker_id = ? OR sm.cluster_id = ?)
           AND (
@@ -1154,23 +1215,41 @@ class Database:
         ORDER BY rs.started_at DESC, sm.start_ms ASC
         LIMIT ?
         """
-        rows = self.all(
-            sql,
-            (vault_id, vault_id, session_id, session_id, speaker_id, speaker_id, speaker_id, fts_term, like_pat, limit),
-        )
-        # If no join match because section_messages is seeded without sections in tests, search directly
-        if not rows:
-            fallback_sql = """
-            SELECT sm.message_id, sm.section_id, sm.speaker_id, sm.cluster_id, sm.speaker_name,
-                   sm.content, sm.start_ms, sm.end_ms, sm.confidence
-            FROM section_messages sm
-            WHERE (
-                (sm.message_id IN (SELECT message_id FROM section_messages_fts WHERE section_messages_fts MATCH ?))
-                OR (sm.content LIKE ?)
-            )
-            LIMIT ?
-            """
-            rows = self.all(fallback_sql, (fts_term, like_pat, limit))
+
+        sql_like_only = """
+        SELECT sm.message_id, sm.section_id, sm.speaker_id, sm.cluster_id, sm.speaker_name,
+               sm.content, sm.start_ms, sm.end_ms, sm.confidence,
+               s.live_session_id AS session_id, s.title AS section_title,
+               rs.started_at AS session_started_at
+        FROM section_messages sm
+        INNER JOIN sections s ON sm.section_id = s.section_id
+        LEFT JOIN recording_sessions rs ON s.live_session_id = rs.live_session_id
+        WHERE s.vault_id = ?
+          AND (? IS NULL OR s.live_session_id = ?)
+          AND (? IS NULL OR sm.speaker_id = ? OR sm.cluster_id = ?)
+          AND sm.content LIKE ?
+        ORDER BY rs.started_at DESC, sm.start_ms ASC
+        LIMIT ?
+        """
+
+        rows = []
+        if fts_term:
+            try:
+                rows = self.all(
+                    sql_fts,
+                    (vault_id, session_id, session_id, speaker_id, speaker_id, speaker_id, fts_term, like_pat, limit),
+                )
+            except sqlite3.OperationalError:
+                rows = []
+
+        if not rows and like_pat:
+            try:
+                rows = self.all(
+                    sql_like_only,
+                    (vault_id, session_id, session_id, speaker_id, speaker_id, speaker_id, like_pat, limit),
+                )
+            except sqlite3.OperationalError:
+                rows = []
 
         results = []
         for r in rows:
@@ -1180,8 +1259,10 @@ class Database:
                 local_label=r.get("speaker_name"),
             )
             raw_spk = r.get("speaker_name")
-            if raw_spk and raw_spk not in ("Unknown", "Speaker") and not spk_name.startswith("Speaker"):
+            if spk_name and not spk_name.startswith("Speaker"):
                 resolved_name = spk_name
+            elif raw_spk and raw_spk not in ("Unknown", "Speaker") and not raw_spk.startswith("Speaker"):
+                resolved_name = raw_spk
             else:
                 resolved_name = spk_name or raw_spk or "Speaker 1"
 
@@ -1208,37 +1289,72 @@ class Database:
         date_to: str | None = None,
         limit: int = 10,
     ) -> list[dict]:
-        like_pat = f"%{query.strip()}%"
+        clean_query = "".join(ch for ch in query if ch.isprintable() and ch != "\x00").strip()
+        if not clean_query:
+            return []
 
-        # 1. Search memory_events table
-        me_rows = self.all(
-            """SELECT event_id AS memory_id, 'memory_event' AS kind, title, summary AS snippet,
-                      start_time AS occurred_at, speaker_names, confidence
-               FROM memory_events
-               WHERE vault_id = ?
-                 AND (title LIKE ? OR summary LIKE ? OR keywords LIKE ?)
-                 AND (? IS NULL OR start_time >= ?)
-                 AND (? IS NULL OR end_time <= ?)
-               ORDER BY start_time DESC
-               LIMIT ?""",
-            (vault_id, like_pat, like_pat, like_pat, date_from, date_from, date_to, date_to, limit),
-        )
+        tokens = sanitize_fts_tokens(clean_query)
+        fts_term = " ".join(f'"{t}"' for t in tokens) if tokens else None
+        like_pat = f"%{clean_query}%"
+
+        # 1. Search memory_events table (FTS5 + LIKE)
+        me_rows = []
+        if fts_term:
+            try:
+                me_rows = self.all(
+                    """SELECT event_id AS memory_id, 'memory_event' AS kind, title, summary AS snippet,
+                              start_time AS occurred_at, speaker_names, confidence
+                       FROM memory_events
+                       WHERE vault_id = ?
+                         AND (
+                             (event_id IN (SELECT event_id FROM memory_events_fts WHERE memory_events_fts MATCH ?))
+                             OR (title LIKE ? OR summary LIKE ? OR keywords LIKE ?)
+                         )
+                         AND (? IS NULL OR start_time >= ?)
+                         AND (? IS NULL OR end_time <= ?)
+                       ORDER BY start_time DESC
+                       LIMIT ?""",
+                    (vault_id, fts_term, like_pat, like_pat, like_pat, date_from, date_from, date_to, date_to, limit),
+                )
+            except sqlite3.OperationalError:
+                me_rows = []
+
+        if not me_rows:
+            try:
+                me_rows = self.all(
+                    """SELECT event_id AS memory_id, 'memory_event' AS kind, title, summary AS snippet,
+                              start_time AS occurred_at, speaker_names, confidence
+                       FROM memory_events
+                       WHERE vault_id = ?
+                         AND (title LIKE ? OR summary LIKE ? OR keywords LIKE ?)
+                         AND (? IS NULL OR start_time >= ?)
+                         AND (? IS NULL OR end_time <= ?)
+                       ORDER BY start_time DESC
+                       LIMIT ?""",
+                    (vault_id, like_pat, like_pat, like_pat, date_from, date_from, date_to, date_to, limit),
+                )
+            except sqlite3.OperationalError:
+                me_rows = []
 
         # 2. Search summaries table
-        sum_rows = self.all(
-            """SELECT summary_id AS memory_id, 'summary' AS kind,
-                      target_type || ' ' || target_id AS title,
-                      summary_markdown AS snippet,
-                      created_at AS occurred_at, '[]' AS speaker_names, 1.0 AS confidence
-               FROM summaries
-               WHERE vault_id = ?
-                 AND (summary_markdown LIKE ? OR topics LIKE ?)
-                 AND (? IS NULL OR created_at >= ?)
-                 AND (? IS NULL OR created_at <= ?)
-               ORDER BY created_at DESC
-               LIMIT ?""",
-            (vault_id, like_pat, like_pat, date_from, date_from, date_to, date_to, limit),
-        )
+        sum_rows = []
+        try:
+            sum_rows = self.all(
+                """SELECT summary_id AS memory_id, 'summary' AS kind,
+                          target_type || ' ' || target_id AS title,
+                          summary_markdown AS snippet,
+                          created_at AS occurred_at, '[]' AS speaker_names, 1.0 AS confidence
+                   FROM summaries
+                   WHERE vault_id = ?
+                     AND (summary_markdown LIKE ? OR topics LIKE ?)
+                     AND (? IS NULL OR created_at >= ?)
+                     AND (? IS NULL OR created_at <= ?)
+                   ORDER BY created_at DESC
+                   LIMIT ?""",
+                (vault_id, like_pat, like_pat, date_from, date_from, date_to, date_to, limit),
+            )
+        except sqlite3.OperationalError:
+            sum_rows = []
 
         combined = [dict(r) for r in me_rows] + [dict(r) for r in sum_rows]
 

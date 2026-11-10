@@ -31,7 +31,7 @@ from .vad import speech_intervals, score_intervals
 from .lease import LeaseRejectionException, PrimaryLeaseArbiter
 from .storage import StorageService
 from .upload import UploadService, AudioBitstreamException
-from .sse import TurnStreamManager, SSE_HEADERS, parse_last_event_id
+from .sse import TurnStreamManager, SSE_HEADERS, parse_last_event_id, BufferedEvent
 from .chat import GeminiChatAgent, SyntheticGeminiAgent
 from .sync import (get_processing_chains_response, get_recording_mutations_response,
                    record_client_mutations)
@@ -1188,68 +1188,140 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         tenant_id = auth.get("tenant_id") or "ten_default"
         user_id = auth.get("user_id") or "usr_default"
 
-        # Multi-tenant scoping & 404 Anti-Enumeration & On-the-fly thread creation
+        # Multi-tenant scoping & thread auto-creation race handling
         thread = db.get_chat_thread(thread_id)
         if thread:
             if thread["vault_id"] != vault_id:
                 raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
         else:
-            # Auto-create thread in caller's vault if unallocated
-            db.create_chat_thread(
-                thread_id=thread_id,
-                tenant_id=tenant_id,
-                vault_id=vault_id,
-                user_id=user_id,
-                title=payload.effective_prompt[:64],
-            )
+            try:
+                db.create_chat_thread(
+                    thread_id=thread_id,
+                    tenant_id=tenant_id,
+                    vault_id=vault_id,
+                    user_id=user_id,
+                    title=payload.effective_prompt[:64],
+                )
+            except Exception:
+                thread = db.get_chat_thread(thread_id)
+                if thread and thread["vault_id"] != vault_id:
+                    raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
 
         turn_id = payload.client_turn_id or f"turn_{secrets.token_hex(8)}"
 
         # Check existing turn in DB for foreign vault isolation
         db_turn = db.get_chat_turn(turn_id)
-        if db_turn and db_turn.get("vault_id") != vault_id:
+        if db_turn and (db_turn.get("vault_id") != vault_id or db_turn.get("thread_id") != thread_id):
             raise HTTPException(status_code=404, detail="Turn not found")
 
         if not db_turn:
-            db.create_chat_turn(
-                turn_id=turn_id,
-                thread_id=thread_id,
-                tenant_id=tenant_id,
-                vault_id=vault_id,
-                prompt=payload.effective_prompt,
-                client_turn_id=payload.client_turn_id,
-                client_context=payload.client_context,
-            )
+            try:
+                db_turn = db.create_chat_turn(
+                    turn_id=turn_id,
+                    thread_id=thread_id,
+                    tenant_id=tenant_id,
+                    vault_id=vault_id,
+                    prompt=payload.effective_prompt,
+                    client_turn_id=payload.client_turn_id,
+                    client_context=payload.client_context,
+                )
+            except Exception:
+                db_turn = db.get_chat_turn(turn_id, vault_id)
+                if not db_turn:
+                    db_turn_any = db.get_chat_turn(turn_id)
+                    if db_turn_any and db_turn_any.get("vault_id") != vault_id:
+                        raise HTTPException(status_code=404, detail="Turn not found")
+                    raise
 
         last_event_id = request.headers.get("Last-Event-ID")
         start_seq = parse_last_event_id(last_event_id, turn_id)
 
+        # Handle pre-start cancellation registered in turn_manager
+        is_cancelled_in_manager = turn_manager.is_cancelled(turn_id)
+        buf = turn_manager.get(turn_id)
+        if is_cancelled_in_manager:
+            if buf is None:
+                buf = turn_manager.get_or_create(turn_id, thread_id)
+            buf.mark_cancelled()
+
         # Check buffer expiration (HTTP 410 Gone)
-        if turn_manager.is_expired_turn(turn_id):
+        is_reconnect_attempt = bool(last_event_id and (last_event_id.startswith(f"{turn_id}_") or last_event_id == turn_id))
+        is_terminal_in_db = bool(db_turn and db_turn.get("status") in ("completed", "failed", "cancelled")) and not is_cancelled_in_manager
+
+        if turn_manager.is_expired_turn(turn_id) or ((is_reconnect_attempt or is_terminal_in_db) and buf is None):
             return JSONResponse(
                 status_code=410,
                 content={"error": "turn_replay_buffer_expired", "message": "Turn replay buffer has expired"},
             )
 
-        buf = turn_manager.get(turn_id)
         if buf is None:
             buf = turn_manager.get_or_create(turn_id, thread_id)
-            # Run reasoning agent
-            agent = GeminiChatAgent(db=db, api_key=settings.gemini_key, model=settings.gemini_model)
-            await agent.execute_turn(
-                buffer=buf,
-                prompt=payload.effective_prompt,
-                vault_id=vault_id,
-                user_id=user_id,
-                client_context=payload.client_context,
-            )
+
+        # Ensure cancelled state is synchronized to DB if cancelled
+        if is_cancelled_in_manager or (db_turn and db_turn.get("status") == "cancelled"):
+            buf.mark_cancelled()
+            try:
+                db.update_chat_turn_status(turn_id, "cancelled", vault_id=vault_id)
+            except Exception:
+                pass
+
+        # If not completed and no execution in progress, start agent execution task
+        if not buf.is_completed and not buf.is_cancelled:
+            if not turn_manager.is_executing(turn_id):
+                agent = GeminiChatAgent(db=db, api_key=settings.gemini_key, model=settings.gemini_model)
+                exec_task = asyncio.create_task(
+                    agent.execute_turn(
+                        buffer=buf,
+                        prompt=payload.effective_prompt,
+                        vault_id=vault_id,
+                        user_id=user_id,
+                        client_context=payload.client_context,
+                    )
+                )
+                turn_manager.set_executing_task(turn_id, exec_task)
 
         async def event_generator() -> AsyncGenerator[str, None]:
-            # Replay all events after start_seq
-            events = buf.get_events_after(start_seq)
-            for ev in events:
-                yield ev.raw_frame
-                await asyncio.sleep(0.001)
+            # Register subscriber queue to receive live events if turn is active
+            queue: asyncio.Queue[BufferedEvent | None] | None = None
+            if not buf.is_completed:
+                queue = asyncio.Queue()
+                buf._subscribers.add(queue)
+
+            last_seq = start_seq
+            try:
+                # 1. Replay historical events
+                events = buf.get_events_after(start_seq)
+                for ev in events:
+                    if ev.seq > last_seq:
+                        last_seq = ev.seq
+                    yield ev.raw_frame
+                    await asyncio.sleep(0.0001)
+
+                # 2. Progressively stream live events until terminal completion
+                if queue is not None and not buf.is_completed:
+                    while not buf.is_completed:
+                        try:
+                            ev = await asyncio.wait_for(queue.get(), timeout=2.0)
+                        except asyncio.TimeoutError:
+                            if buf.is_completed:
+                                break
+                            continue
+                        if ev is None:
+                            break
+                        if ev.seq > last_seq:
+                            last_seq = ev.seq
+                            yield ev.raw_frame
+
+                # 3. Drain any remaining events in queue
+                if queue is not None:
+                    while not queue.empty():
+                        ev = queue.get_nowait()
+                        if ev is not None and ev.seq > last_seq:
+                            last_seq = ev.seq
+                            yield ev.raw_frame
+            finally:
+                if queue is not None:
+                    buf._subscribers.discard(queue)
 
         return StreamingResponse(
             event_generator(),
@@ -1264,14 +1336,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         auth: dict = Depends(authenticate_tenancy),
     ):
         vault_id = auth.get("vault_id") or "vlt_default"
+
         thread = db.get_chat_thread(thread_id)
-        if thread and thread["vault_id"] != vault_id:
+        if not thread or thread["vault_id"] != vault_id:
             raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
+
+        turn = db.get_chat_turn(turn_id)
+        if turn and (turn.get("vault_id") != vault_id or turn.get("thread_id") != thread_id):
+            raise HTTPException(status_code=404, detail="Turn not found")
 
         turn_manager.cancel(turn_id)
         cancelled_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
         try:
-            db.update_chat_turn_status(turn_id, "cancelled")
+            db.update_chat_turn_status(turn_id, "cancelled", vault_id=vault_id)
         except Exception:
             pass
 

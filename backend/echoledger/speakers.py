@@ -394,6 +394,11 @@ def resolve_speaker_name(
         if suspected and str(suspected).strip():
             return str(suspected).strip()
 
+    # Existing local label on utterance context (if provided and non-generic)
+    local_label = utterance_context.get("speaker_name") or utterance_context.get("local_label")
+    if local_label and str(local_label).strip() and str(local_label).strip() not in ("Unknown", "Speaker") and not str(local_label).strip().startswith("Speaker"):
+        return str(local_label).strip()
+
     # Tier 3: Sequential Unknown Speaker Index
     unknown_idx = utterance_context.get("unknown_speaker_index", 1)
     return f"Speaker {unknown_idx}"
@@ -446,6 +451,10 @@ class SessionSpeakerResolver:
             )
             if suspected and str(suspected).strip():
                 return str(suspected).strip()
+
+        # Prioritize existing concrete name on utterance if not a generic placeholder
+        if local_label and str(local_label).strip() and str(local_label).strip() not in ("Unknown", "Speaker") and not str(local_label).strip().startswith("Speaker"):
+            return str(local_label).strip()
 
         # Tier 3: Deterministic Sequential Index
         unassigned_key = speaker_id or cluster_id or local_label or f"_anon_{len(self._unknown_map) + 1}"

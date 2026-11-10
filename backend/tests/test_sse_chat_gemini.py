@@ -618,3 +618,105 @@ class TestMultiTenantMicroIsolation:
         assert res_b.status_code == 200
         for m in res_b.json()["mutations"]:
             assert m["vault_id"] == "vlt_beta"
+
+    def test_search_sections_and_memory_strict_vault_isolation(self, test_setup):
+        db: Database = test_setup["db"]
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        with db.connect(immediate=True) as c:
+            c.execute(
+                "INSERT INTO recording_sessions (live_session_id, tenant_id, vault_id, user_id, dp_instance_id, local_day_key, started_at, status) VALUES ('sess_iso_01', 'ten_alpha', 'vlt_alpha', 'usr_alpha', 'dp_alpha', '2026-11-10', ?, 'recording')",
+                (now_iso,),
+            )
+            c.execute(
+                "INSERT INTO sections (section_id, live_session_id, tenant_id, vault_id, section_index, start_ms, end_ms, transcript) VALUES ('sec_iso_01', 'sess_iso_01', 'ten_alpha', 'vlt_alpha', 0, 0, 5000, 'merger meeting')",
+            )
+            c.execute(
+                "INSERT INTO section_messages (message_id, section_id, content, start_ms, end_ms, speaker_name) VALUES ('msg_iso_01', 'sec_iso_01', 'Top secret merger plan code 9988', 1000, 4000, 'CEO')",
+            )
+
+        # Alpha finds it
+        alpha_matches = db.search_sections(vault_id="vlt_alpha", query="9988")
+        assert len(alpha_matches) == 1
+        assert "Top secret merger" in alpha_matches[0]["content"]
+
+        # Beta MUST receive 0 matches
+        beta_matches = db.search_sections(vault_id="vlt_beta", query="9988")
+        assert len(beta_matches) == 0
+
+        # Beta searching memory MUST receive 0 matches
+        beta_mem = db.search_memory(vault_id="vlt_beta", query="9988")
+        assert len(beta_mem) == 0
+
+    def test_cross_tenant_turn_cancellation_anti_enumeration(self, test_setup):
+        client: TestClient = test_setup["client"]
+        headers_alpha = test_setup["headers_alpha"]
+        headers_beta = test_setup["headers_beta"]
+        db: Database = test_setup["db"]
+
+        thread_id = "th_cancel_iso"
+        turn_id = "turn_cancel_iso"
+        db.create_chat_thread(thread_id=thread_id, tenant_id="ten_alpha", vault_id="vlt_alpha", user_id="usr_alpha")
+        db.create_chat_turn(turn_id=turn_id, thread_id=thread_id, tenant_id="ten_alpha", vault_id="vlt_alpha", prompt="Secret turn")
+
+        # 1. Beta attempts cancel using valid Alpha thread_id -> HTTP 404
+        res1 = client.post(f"/chat/threads/{thread_id}/turns/{turn_id}/cancel", headers=headers_beta)
+        assert res1.status_code == 404
+
+        # 2. Beta attempts cancel using bogus/unallocated thread_id -> HTTP 404 (anti-enumeration)
+        res2 = client.post(f"/chat/threads/th_bogus_id/turns/{turn_id}/cancel", headers=headers_beta)
+        assert res2.status_code == 404
+
+        # 3. Alpha turn in DB remains active (not cancelled)
+        assert db.get_chat_turn(turn_id)["status"] != "cancelled"
+
+        # 4. Alpha cancels own turn -> HTTP 200
+        res3 = client.post(f"/chat/threads/{thread_id}/turns/{turn_id}/cancel", headers=headers_alpha)
+        assert res3.status_code == 200
+        assert res3.json()["status"] == "cancelled"
+        assert db.get_chat_turn(turn_id)["status"] == "cancelled"
+
+    def test_search_sections_special_characters_graceful(self, test_setup):
+        db: Database = test_setup["db"]
+        for special in ["*", '"', '"""', "", "   ", ": ~ ^", "()", "AND NOT", "OR"]:
+            res = db.search_sections(vault_id="vlt_alpha", query=special)
+            assert isinstance(res, list)
+            mem_res = db.search_memory(vault_id="vlt_alpha", query=special)
+            assert isinstance(mem_res, list)
+
+    def test_speaker_name_preservation_in_search_sections(self, test_setup):
+        db: Database = test_setup["db"]
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        with db.connect(immediate=True) as c:
+            c.execute(
+                "INSERT INTO recording_sessions (live_session_id, tenant_id, vault_id, user_id, dp_instance_id, local_day_key, started_at, status) VALUES ('sess_spk_01', 'ten_alpha', 'vlt_alpha', 'usr_alpha', 'dp_alpha', '2026-11-10', ?, 'recording')",
+                (now_iso,),
+            )
+            c.execute(
+                "INSERT INTO sections (section_id, live_session_id, tenant_id, vault_id, section_index, start_ms, end_ms, transcript) VALUES ('sec_spk_01', 'sess_spk_01', 'ten_alpha', 'vlt_alpha', 0, 0, 5000, 'audio chat')",
+            )
+            c.execute(
+                "INSERT INTO section_messages (message_id, section_id, content, start_ms, end_ms, speaker_name) VALUES ('msg_spk_01', 'sec_spk_01', 'Discussing budget metrics', 500, 3000, 'Bob')",
+            )
+
+        matches = db.search_sections(vault_id="vlt_alpha", query="budget metrics")
+        assert len(matches) == 1
+        assert matches[0]["speaker_name"] == "Bob"
+
+    def test_search_memory_fts5_stemmed_and_noncontiguous(self, test_setup):
+        db: Database = test_setup["db"]
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        db.create_memory_event(
+            event_id="me_park_01",
+            tenant_id="ten_alpha",
+            vault_id="vlt_alpha",
+            title="Parking Location",
+            summary="I parked my red car at underground level B2 space 14",
+            start_time=now_iso,
+            end_time=now_iso,
+            keywords=["parking", "car", "location"],
+        )
+
+        matches = db.search_memory(vault_id="vlt_alpha", query="parked car")
+        assert len(matches) >= 1
+        assert any(m["title"] == "Parking Location" for m in matches)
+

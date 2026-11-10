@@ -31,6 +31,9 @@ class SseChatService {
     required String threadId,
     required String prompt,
     required String authToken,
+    String tenantId = 'ten_default',
+    String vaultId = 'vlt_default',
+    String userId = 'usr_default',
     String? lastEventId,
     Map<String, dynamic>? clientContext,
   }) async* {
@@ -40,6 +43,9 @@ class SseChatService {
     request.headers['Authorization'] = 'Bearer $authToken';
     request.headers['Content-Type'] = 'application/json';
     request.headers['Accept'] = 'text/event-stream';
+    request.headers['x-tenant-id'] = tenantId;
+    request.headers['x-vault-id'] = vaultId;
+    request.headers['x-user-id'] = userId;
     if (lastEventId != null) {
       request.headers['Last-Event-ID'] = lastEventId;
     }

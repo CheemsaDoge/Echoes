@@ -293,9 +293,9 @@ class UploadWorker(
         val prefs = applicationContext.getSharedPreferences("connection", Context.MODE_PRIVATE)
         val securePrefs = runCatching { dev.echoledger.app.data.SecurePreferences(applicationContext) }.getOrNull()
         val token = securePrefs?.token?.takeIf { it.isNotEmpty() } ?: prefs.getString("token", "") ?: ""
-        val baseUrl = securePrefs?.baseUrl?.takeIf { it.isNotEmpty() } ?: prefs.getString("url", "") ?: ""
-        val tenantId = prefs.getString("active_tenant_id", "") ?: ""
-        val vaultId = prefs.getString("active_vault_id", "") ?: ""
+        val baseUrl = securePrefs?.baseUrl?.takeIf { it.isNotEmpty() } ?: prefs.getString("url", "https://record.xmdoge.com") ?: "https://record.xmdoge.com"
+        val tenantId = prefs.getString("active_tenant_id", "ten_default")?.takeIf { it.isNotEmpty() } ?: "ten_default"
+        val vaultId = prefs.getString("active_vault_id", "vlt_default")?.takeIf { it.isNotEmpty() } ?: "vlt_default"
 
         if (token.isEmpty() || baseUrl.isEmpty() || tenantId.isEmpty() || vaultId.isEmpty()) {
             return null

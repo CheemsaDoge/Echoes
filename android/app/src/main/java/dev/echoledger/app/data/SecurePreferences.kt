@@ -69,7 +69,7 @@ class SecurePreferences(
     }
 
     var baseUrl: String
-        get() = prefs.getString("url", if (BuildConfig.DEBUG) "http://10.0.2.2:8000" else "") ?: ""
+        get() = prefs.getString("url", "https://record.xmdoge.com") ?: "https://record.xmdoge.com"
         set(value) { prefs.edit().putString("url", value.trim().trimEnd('/')).commit() }
 
     var token: String
@@ -81,7 +81,10 @@ class SecurePreferences(
         set(value) { prefs.edit().putLong("cursor", value).apply() }
 
     var operationMode: String
-        get() = prefs.getString("operation_mode", "standalone") ?: "standalone"
+        get() {
+            val defaultMode = if (keyProvider == null) "server" else "standalone"
+            return prefs.getString("operation_mode", defaultMode) ?: defaultMode
+        }
         set(value) { prefs.edit().putString("operation_mode", value.trim()).commit() }
 
     var aiProvider: String

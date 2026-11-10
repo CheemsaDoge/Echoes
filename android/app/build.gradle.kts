@@ -89,7 +89,6 @@ fun computeGitSemanticVersion(): String {
             }
             Regex("""^feat(\([^)]*\))?:""").containsMatchIn(lower) -> {
                 patch += 1
-                hotfix = 0
             }
             else -> {
                 hotfix = (hotfix ?: 0) + 1

@@ -148,8 +148,8 @@ class _SseChatViewState extends State<SseChatView> {
           });
           _scrollToBottom();
         } else if (event.event == 'tool_call_started') {
-          final tool = event.data['tool'] as String? ?? 'tool';
-          final args = event.data['args'] as Map<String, dynamic>?;
+          final tool = (event.data['tool_name'] ?? event.data['tool']) as String? ?? 'tool';
+          final args = (event.data['arguments'] ?? event.data['args']) as Map<String, dynamic>?;
           setState(() {
             _messages.insert(
               _messages.length - 1,

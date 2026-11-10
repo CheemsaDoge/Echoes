@@ -2,7 +2,6 @@
 /// Paints 24 hour markers, horizontal grid lines, green/coral audio bars, and live clock needle.
 library;
 
-import 'dart:ui';
 import 'package:flutter/material.dart';
 import '../../core/models/timeline_models.dart';
 import '../theme/hemory_theme.dart';
@@ -27,13 +26,13 @@ class CoveragePainter extends CustomPainter {
     const double barWidth = 4.0;
 
     final gridPaint = Paint()
-      ..color = HemoryColors.darkBorder.withOpacity(0.35)
+      ..color = HemoryColors.darkBorder.withValues(alpha: 0.35)
       ..strokeWidth = 0.8;
 
     final textStyle = TextStyle(
-      color = HemoryColors.textLightSecondary.withOpacity(0.7),
-      fontSize = 11.0,
-      fontWeight = FontWeight.w500,
+      color: HemoryColors.textLightSecondary.withValues(alpha: 0.7),
+      fontSize: 11.0,
+      fontWeight: FontWeight.w500,
       fontFeatures: const [FontFeature.tabularFigures()],
     );
 
@@ -61,7 +60,7 @@ class CoveragePainter extends CustomPainter {
       final paint = Paint()
         ..color = seg.isLive
             ? HemoryColors.liveCoral
-            : HemoryColors.sagePrimary.withOpacity(0.45);
+            : HemoryColors.sagePrimary.withValues(alpha: 0.45);
 
       final rrect = RRect.fromRectAndRadius(
         Rect.fromLTRB(barX, yStart, barX + barWidth, yEnd),

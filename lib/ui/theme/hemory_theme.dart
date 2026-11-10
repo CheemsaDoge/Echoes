@@ -3,7 +3,6 @@
 /// and tabular figures to eliminate layout jitter.
 library;
 
-import 'dart:ui';
 import 'package:flutter/material.dart';
 
 class HemoryColors {

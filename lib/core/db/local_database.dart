@@ -264,7 +264,6 @@ class RecordingMutation {
 class LocalDatabase {
   final Map<String, RecordingSessionRecord> _sessions = {};
   final Map<String, RecordingSegmentRecord> _segments = {};
-  final Map<String, UploadQueueRecord> _uploadQueue = {};
   final Map<String, TimelineEventRecord> _timelineEvents = {};
   final Map<String, SpeakerProfileRecord> _speakerProfiles = {};
   final Map<String, int> _mutationCursors = {}; // vaultId -> lastCursor

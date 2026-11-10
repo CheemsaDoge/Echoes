@@ -1,11 +1,10 @@
 /// Main application entrypoint for Hemory Flutter client.
-/// Sets up Riverpod ProviderScope and award-tier Obsidian Dark theme.
 library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'ui/shell/hemory_shell.dart';
 import 'ui/theme/hemory_theme.dart';
-import 'ui/timeline/memory_timeline_scene.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -25,7 +24,7 @@ class HemoryApp extends StatelessWidget {
       title: 'Hemory',
       debugShowCheckedModeBanner: false,
       theme: HemoryTheme.darkTheme,
-      home: const MemoryTimelineScene(),
+      home: const HemoryShell(),
     );
   }
 }

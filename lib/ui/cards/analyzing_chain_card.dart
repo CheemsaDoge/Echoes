@@ -40,7 +40,7 @@ class AnalyzingChainCard extends StatelessWidget {
         filter: ImageFilter.blur(sigmaX: 18.0, sigmaY: 18.0),
         child: Container(
           decoration: HemoryTheme.frostedBoxDecoration(
-            borderColor: HemoryColors.sagePrimary.withOpacity(0.3),
+            borderColor: HemoryColors.sagePrimary.withValues(alpha: 0.3),
           ),
           padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 14.0),
           child: Column(
@@ -116,8 +116,8 @@ class AnalyzingChainCard extends StatelessWidget {
 
     switch (state) {
       case ChainStepState.completed:
-        bg = HemoryColors.sagePrimary.withOpacity(0.2);
-        border = HemoryColors.sagePrimary.withOpacity(0.6);
+        bg = HemoryColors.sagePrimary.withValues(alpha: 0.2);
+        border = HemoryColors.sagePrimary.withValues(alpha: 0.6);
         text = HemoryColors.sagePrimary;
         break;
       case ChainStepState.active:
@@ -126,8 +126,8 @@ class AnalyzingChainCard extends StatelessWidget {
         text = HemoryColors.textLightPrimary;
         break;
       case ChainStepState.pending:
-        bg = HemoryColors.darkSurface1.withOpacity(0.4);
-        border = HemoryColors.darkBorder.withOpacity(0.4);
+        bg = HemoryColors.darkSurface1.withValues(alpha: 0.4);
+        border = HemoryColors.darkBorder.withValues(alpha: 0.4);
         text = HemoryColors.textLightMuted;
         break;
     }

@@ -74,7 +74,7 @@ class _TimelineLiveCardState extends State<TimelineLiveCard>
           decoration: HemoryTheme.frostedBoxDecoration(
             borderColor: widget.isPaused
                 ? HemoryColors.darkBorder
-                : HemoryColors.liveCoral.withOpacity(0.35),
+                : HemoryColors.liveCoral.withValues(alpha: 0.35),
           ),
           padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 14.0),
           child: Column(
@@ -114,7 +114,7 @@ class _TimelineLiveCardState extends State<TimelineLiveCard>
                                   if (!widget.isPaused)
                                     BoxShadow(
                                       color: HemoryColors.liveCoral
-                                          .withOpacity(glowOpacity),
+                                          .withValues(alpha: glowOpacity),
                                       blurRadius: 8.0,
                                       spreadRadius: 2.0,
                                     ),

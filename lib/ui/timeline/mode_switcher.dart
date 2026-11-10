@@ -46,7 +46,7 @@ class ModeSwitcher extends StatelessWidget {
                 color: HemoryColors.darkSurface2,
                 borderRadius: BorderRadius.circular(16.0),
                 border: Border.all(
-                  color: HemoryColors.sagePrimary.withOpacity(0.5),
+                  color: HemoryColors.sagePrimary.withValues(alpha: 0.5),
                   width: 0.8,
                 ),
                 boxShadow: const [

@@ -1,19 +1,23 @@
 /// MemoryTimelineScene: Master viewport coordinating DateStrip, ModeSwitcher,
-/// and IndexedStack hosting CalendarView and RiverView with zero state loss.
+/// live capture controls, real server timeline sync, and Calendar/River views.
 library;
 
+import 'dart:async';
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
+import '../../core/ipc/event_channels.dart';
 import '../../core/models/timeline_models.dart';
-import '../../core/services/recording_service.dart';
+import '../../core/providers/app_providers.dart';
+import '../../core/services/hemory_api_client.dart';
 import '../theme/hemory_theme.dart';
-import 'date_strip.dart';
-import 'mode_switcher.dart';
 import 'calendar_view.dart';
-import 'river_view.dart';
 import 'clipping_engine.dart';
+import 'date_strip.dart';
+import 'event_detail_sheet.dart';
+import 'mode_switcher.dart';
+import 'river_view.dart';
 
 class MemoryTimelineScene extends ConsumerStatefulWidget {
   final List<TimelineInterval>? initialIntervals;
@@ -26,113 +30,142 @@ class MemoryTimelineScene extends ConsumerStatefulWidget {
   });
 
   @override
-  ConsumerState<MemoryTimelineScene> createState() => _MemoryTimelineSceneState();
+  ConsumerState<MemoryTimelineScene> createState() =>
+      _MemoryTimelineSceneState();
 }
 
 class _MemoryTimelineSceneState extends ConsumerState<MemoryTimelineScene> {
-  DateTime _selectedDate = DateTime.now();
-  TimelineViewMode _viewMode = TimelineViewMode.calendar;
-
-  // Local mock/cached intervals for presentation
-  late List<TimelineInterval> _rawIntervals;
-  late List<TimelineCoverageSegment> _coverageSegments;
-  final List<double> _mockWaveform = List.generate(36, (i) => 0.15 + (i % 7) * 0.1);
+  TimelineViewMode _viewMode = TimelineViewMode.river;
+  StreamSubscription<SegmentCompletedEvent>? _segmentSub;
+  Timer? _mutationPollTimer;
+  int _lastMutationCursor = 0;
 
   @override
   void initState() {
     super.initState();
-    _rawIntervals = widget.initialIntervals ?? _buildSampleIntervals();
-    _coverageSegments = widget.initialCoverage ?? _buildSampleCoverage();
+    if (widget.initialIntervals == null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _attachLiveSync();
+      });
+    }
   }
 
-  List<TimelineInterval> _buildSampleIntervals() {
-    return [
-      TimelineInterval(
-        intervalId: 'act_01',
-        startMs: 9 * 60 + 30, // 09:30
-        endMs: 10 * 60 + 15,  // 10:15
-        tier: TimelineTier.p2Activity,
-        itemType: 'Activity',
-        payload: {
-          'title': 'Sprint Planning & Architecture Review',
-          'summary': 'Reviewed 5-tier interval clipping engine and Riverpod state machine.',
-          'speakers': ['Dr. Sarah Lin', 'Marcus'],
-          'tags': ['planning', 'architecture'],
-        },
-      ),
-      TimelineInterval(
-        intervalId: 'chat_01',
-        startMs: 11 * 60 + 0, // 11:00
-        endMs: 11 * 60 + 25, // 11:25
-        tier: TimelineTier.p3ScatteredChat,
-        itemType: 'ScatteredChatGroup',
-        payload: {
-          'snippets': [
-            {'speaker': 'Alice', 'text': 'Can we deploy the M5 release to dogfood?', 'time': '11:05'},
-            {'speaker': 'Bob', 'text': 'Yes, all unit and E2E suites are passing.', 'time': '11:06'},
-          ],
-        },
-      ),
-      TimelineInterval(
-        intervalId: 'chain_01',
-        startMs: 14 * 60 + 0, // 14:00
-        endMs: 14 * 60 + 40, // 14:40
-        tier: TimelineTier.p1AnalyzingChain,
-        itemType: 'AnalyzingChainCard',
-        payload: {
-          'progress': 0.72,
-          'current_phase': 'diarizing',
-        },
-      ),
-    ];
-  }
-
-  List<TimelineCoverageSegment> _buildSampleCoverage() {
-    return [
-      const TimelineCoverageSegment(startMinute: 9 * 60 + 30, endMinute: 10 * 60 + 15),
-      const TimelineCoverageSegment(startMinute: 11 * 60, endMinute: 11 * 60 + 25),
-      const TimelineCoverageSegment(startMinute: 14 * 60, endMinute: 14 * 60 + 40),
-    ];
-  }
-
-  void _onDateSelected(DateTime date) {
-    setState(() {
-      _selectedDate = date;
+  void _attachLiveSync() {
+    if (!mounted) return;
+    final streams = ref.read(recordingEventStreamsProvider);
+    _segmentSub = streams.segmentsStream.listen((_) {
+      if (!mounted) return;
+      Future.delayed(const Duration(seconds: 2), () {
+        if (mounted) {
+          ref.read(timelineRefreshTickProvider.notifier).state++;
+        }
+      });
     });
-  }
 
-  void _onModeChanged(TimelineViewMode mode) {
-    setState(() {
-      _viewMode = mode;
+    _mutationPollTimer = Timer.periodic(const Duration(seconds: 6), (_) async {
+      if (!mounted) return;
+      final client = ref.read(apiClientProvider);
+      if (client == null) return;
+      try {
+        final next = await client.fetchLatestMutationCursor(
+          after: _lastMutationCursor,
+        );
+        if (!mounted) return;
+        if (_lastMutationCursor == 0) {
+          _lastMutationCursor = next;
+        } else if (next > _lastMutationCursor) {
+          _lastMutationCursor = next;
+          ref.read(timelineRefreshTickProvider.notifier).state++;
+          ref.read(speakersRefreshTickProvider.notifier).state++;
+        }
+      } catch (_) {}
     });
   }
 
   @override
+  void dispose() {
+    _segmentSub?.cancel();
+    _mutationPollTimer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _pickDate(DateTime current) async {
+    final now = DateTime.now();
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: current,
+      firstDate: DateTime(2024, 1, 1),
+      lastDate: now.add(const Duration(days: 7)),
+      builder: (context, child) {
+        return Theme(
+          data: HemoryTheme.darkTheme,
+          child: child!,
+        );
+      },
+    );
+    if (picked != null && mounted) {
+      ref.read(selectedDateProvider.notifier).state =
+          DateTime(picked.year, picked.month, picked.day);
+    }
+  }
+
+  Future<void> _refreshTimeline() async {
+    ref.read(timelineRefreshTickProvider.notifier).state++;
+    await ref
+        .read(timelineDayProvider.future)
+        .catchError((_) => TimelineDayPayload.empty);
+  }
+
+  String _formatBriefElapsed(int ms) {
+    final s = ms ~/ 1000;
+    final m = (s ~/ 60).toString().padLeft(2, '0');
+    final r = (s % 60).toString().padLeft(2, '0');
+    return '$m:$r';
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final selectedDate = ref.watch(selectedDateProvider);
     final recordingState = ref.watch(recordingServiceProvider);
-    final recordingService = ref.read(recordingServiceProvider.notifier);
+    final recordingController = ref.read(recordingServiceProvider.notifier);
+    final liveWaveform = ref.watch(liveMeteringSamplesProvider);
+    final auth = ref.watch(authSessionProvider);
 
-    // Apply Contract C5 clipping engine to candidate intervals
-    var intervalsToDisplay = List<TimelineInterval>.from(_rawIntervals);
+    final dayAsync = widget.initialIntervals != null
+        ? null
+        : ref.watch(timelineDayProvider);
+    final dayPayload = dayAsync?.valueOrNull;
 
-    // If live recording is active, inject P0 LiveCard interval
-    if (recordingState.isRecording) {
-      final now = DateTime.now();
-      final currentMinute = now.hour * 60 + now.minute;
+    final rawIntervals =
+        widget.initialIntervals ?? dayPayload?.intervals ?? const <TimelineInterval>[];
+    final coverageSegments =
+        widget.initialCoverage ?? dayPayload?.coverage ?? const <TimelineCoverageSegment>[];
+    final densityMap = dayPayload?.density ?? const <String, int>{};
+
+    final now = DateTime.now();
+    final isToday = DateUtils.isSameDay(selectedDate, now);
+
+    final intervalsToDisplay = List<TimelineInterval>.from(rawIntervals);
+    if (recordingState.isActive && isToday) {
+      final currentMinute = (now.hour * 60 + now.minute).clamp(0, 1440);
+      final elapsedMinutes = (recordingState.elapsedMs ~/ 60000).clamp(1, 180);
+      final startMinute = (currentMinute - elapsedMinutes).clamp(0, currentMinute);
       intervalsToDisplay.add(
         TimelineInterval(
           intervalId: recordingState.activeRecordingId ?? 'live_card',
-          startMs: (currentMinute - 15).clamp(0, 1440),
-          endMs: currentMinute.clamp(0, 1440),
+          startMs: startMinute,
+          endMs: currentMinute == startMinute
+              ? (startMinute + 1).clamp(1, 1440)
+              : currentMinute,
           tier: TimelineTier.p0LiveCard,
           itemType: 'TimelineLiveCard',
         ),
       );
     }
 
-    // Execute 5-Tier Priority Clipping
-    final clippedIntervals = TimelineClippingEngine.clipTimelineIntervals(intervalsToDisplay);
-    final finalIntervals = TimelineClippingEngine.fillCalendarIdleSegments(
+    final clippedIntervals =
+        TimelineClippingEngine.clipTimelineIntervals(intervalsToDisplay);
+    final finalCalendarIntervals = TimelineClippingEngine.fillCalendarIdleSegments(
       placedIntervals: clippedIntervals,
       dayStartMs: 0,
       dayEndMs: 1440,
@@ -147,7 +180,6 @@ class _MemoryTimelineSceneState extends ConsumerState<MemoryTimelineScene> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                // Frosted Top Header
                 ClipRect(
                   child: BackdropFilter(
                     filter: ImageFilter.blur(sigmaX: 18.0, sigmaY: 18.0),
@@ -161,82 +193,192 @@ class _MemoryTimelineSceneState extends ConsumerState<MemoryTimelineScene> {
                           ),
                         ),
                       ),
-                      padding: const EdgeInsets.symmetric(vertical: 8.0),
+                      padding: const EdgeInsets.only(top: 8.0, bottom: 10.0),
                       child: Column(
                         children: [
-                          // Top Controls: Date Strip
-                          DateStrip(
-                            selectedDate: _selectedDate,
-                            onDateSelected: _onDateSelected,
-                            onPrefetchRequested: (centerDate) {
-                              // Dual-range [-7, +1] prefetch trigger
-                            },
-                          ),
-                          const SizedBox(height: 8.0),
-                          // View Mode Switcher
                           Padding(
                             padding: const EdgeInsets.symmetric(horizontal: 16.0),
                             child: Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
                               children: [
-                                Text(
-                                  DateFormat('yyyy').format(_selectedDate),
-                                  style: const TextStyle(
-                                    fontSize: 12.0,
-                                    fontWeight: FontWeight.w600,
-                                    color: HemoryColors.textLightMuted,
-                                    fontFeatures: [FontFeature.tabularFigures()],
+                                GestureDetector(
+                                  behavior: HitTestBehavior.opaque,
+                                  onTap: () => _pickDate(selectedDate),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Text(
+                                        DateFormat('yyyy / MM').format(selectedDate),
+                                        style: const TextStyle(
+                                          fontSize: 15.0,
+                                          fontWeight: FontWeight.w700,
+                                          letterSpacing: -0.2,
+                                          color: HemoryColors.textLightPrimary,
+                                          fontFeatures: [FontFeature.tabularFigures()],
+                                        ),
+                                      ),
+                                      const SizedBox(width: 2.0),
+                                      const Icon(
+                                        Icons.chevron_right_rounded,
+                                        size: 18.0,
+                                        color: HemoryColors.textLightMuted,
+                                      ),
+                                    ],
                                   ),
                                 ),
+                                if (!isToday) ...[
+                                  const SizedBox(width: 8.0),
+                                  GestureDetector(
+                                    onTap: () {
+                                      final t = DateTime.now();
+                                      ref.read(selectedDateProvider.notifier).state =
+                                          DateTime(t.year, t.month, t.day);
+                                    },
+                                    child: Container(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 8.0,
+                                        vertical: 3.0,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        color: HemoryColors.darkSurface2,
+                                        borderRadius: BorderRadius.circular(10.0),
+                                        border: Border.all(
+                                          color: HemoryColors.darkBorder,
+                                          width: 0.6,
+                                        ),
+                                      ),
+                                      child: const Text(
+                                        '今天',
+                                        style: TextStyle(
+                                          fontSize: 11.0,
+                                          fontWeight: FontWeight.w600,
+                                          color: HemoryColors.sageSecondary,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                                const Spacer(),
+                                _buildCapturePill(
+                                  isActive: recordingState.isActive,
+                                  elapsedMs: recordingState.elapsedMs,
+                                  onTap: () {
+                                    if (recordingState.isActive) {
+                                      recordingController.stopRecording();
+                                    } else {
+                                      recordingController.startRecording(
+                                        tenantId: auth.tenantId,
+                                        vaultId: auth.vaultId,
+                                      );
+                                    }
+                                  },
+                                ),
+                                const SizedBox(width: 8.0),
                                 ModeSwitcher(
                                   activeMode: _viewMode,
-                                  onModeChanged: _onModeChanged,
+                                  onModeChanged: (mode) {
+                                    setState(() => _viewMode = mode);
+                                  },
                                 ),
                               ],
                             ),
+                          ),
+                          const SizedBox(height: 8.0),
+                          DateStrip(
+                            selectedDate: selectedDate,
+                            activityDensityMap: densityMap,
+                            onDateSelected: (d) {
+                              ref.read(selectedDateProvider.notifier).state =
+                                  DateTime(d.year, d.month, d.day);
+                            },
                           ),
                         ],
                       ),
                     ),
                   ),
                 ),
-                // Viewport: IndexedStack preserving state across Calendar & River toggles
+                if (recordingState.lastError != null)
+                  Container(
+                    color: const Color(0x26FF4D4D),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16.0,
+                      vertical: 6.0,
+                    ),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            recordingState.lastError!,
+                            style: const TextStyle(
+                              fontSize: 12.0,
+                              color: HemoryColors.liveCoral,
+                            ),
+                          ),
+                        ),
+                        GestureDetector(
+                          onTap: recordingController.reset,
+                          child: const Icon(
+                            Icons.close_rounded,
+                            size: 16.0,
+                            color: HemoryColors.liveCoral,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                if (dayAsync != null && dayAsync.isLoading && dayPayload == null)
+                  const LinearProgressIndicator(
+                    minHeight: 1.5,
+                    backgroundColor: Colors.transparent,
+                    color: HemoryColors.sagePrimary,
+                  ),
                 Expanded(
                   child: IndexedStack(
                     index: _viewMode.isCalendar ? 0 : 1,
                     children: [
                       CalendarView(
-                        selectedDate: _selectedDate,
-                        intervals: finalIntervals,
-                        coverageSegments: _coverageSegments,
-                        liveMeteringSamples: _mockWaveform,
+                        selectedDate: selectedDate,
+                        intervals: finalCalendarIntervals,
+                        coverageSegments: coverageSegments,
+                        liveMeteringSamples: liveWaveform,
                         liveElapsedMs: recordingState.elapsedMs,
-                        isLiveRecording: recordingState.isRecording,
+                        isLiveRecording: recordingState.isActive,
                         isLivePaused: recordingState.isPaused,
-                        onLiveStopPressed: () => recordingService.stopRecording(),
+                        onLiveStopPressed: () =>
+                            recordingController.stopRecording(),
                         onLivePauseTogglePressed: () {
                           if (recordingState.isPaused) {
-                            recordingService.resumeRecording();
+                            recordingController.resumeRecording();
                           } else {
-                            recordingService.pauseRecording();
+                            recordingController.pauseRecording();
                           }
                         },
+                        onCardTapped: (interval) =>
+                            showTimelineDetailSheet(context, interval),
+                        onRefresh: widget.initialIntervals == null
+                            ? _refreshTimeline
+                            : null,
                       ),
                       RiverView(
-                        selectedDate: _selectedDate,
+                        selectedDate: selectedDate,
                         intervals: clippedIntervals,
-                        liveMeteringSamples: _mockWaveform,
+                        liveMeteringSamples: liveWaveform,
                         liveElapsedMs: recordingState.elapsedMs,
-                        isLiveRecording: recordingState.isRecording,
+                        isLiveRecording: recordingState.isActive,
                         isLivePaused: recordingState.isPaused,
-                        onLiveStopPressed: () => recordingService.stopRecording(),
+                        onLiveStopPressed: () =>
+                            recordingController.stopRecording(),
                         onLivePauseTogglePressed: () {
                           if (recordingState.isPaused) {
-                            recordingService.resumeRecording();
+                            recordingController.resumeRecording();
                           } else {
-                            recordingService.pauseRecording();
+                            recordingController.pauseRecording();
                           }
                         },
+                        onCardTapped: (interval) =>
+                            showTimelineDetailSheet(context, interval),
+                        onRefresh: widget.initialIntervals == null
+                            ? _refreshTimeline
+                            : null,
                       ),
                     ],
                   ),
@@ -244,6 +386,60 @@ class _MemoryTimelineSceneState extends ConsumerState<MemoryTimelineScene> {
               ],
             ),
           ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCapturePill({
+    required bool isActive,
+    required int elapsedMs,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: Container(
+        height: 32.0,
+        padding: const EdgeInsets.symmetric(horizontal: 10.0),
+        decoration: BoxDecoration(
+          color: isActive
+              ? HemoryColors.liveCoral.withValues(alpha: 0.16)
+              : HemoryColors.sagePrimary.withValues(alpha: 0.14),
+          borderRadius: BorderRadius.circular(16.0),
+          border: Border.all(
+            color: isActive
+                ? HemoryColors.liveCoral.withValues(alpha: 0.55)
+                : HemoryColors.sagePrimary.withValues(alpha: 0.55),
+            width: 0.8,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 7.5,
+              height: 7.5,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: isActive
+                    ? HemoryColors.liveCoral
+                    : HemoryColors.sagePrimary,
+              ),
+            ),
+            const SizedBox(width: 6.0),
+            Text(
+              isActive ? _formatBriefElapsed(elapsedMs) : '录音',
+              style: TextStyle(
+                fontSize: 12.0,
+                fontWeight: FontWeight.w600,
+                color: isActive
+                    ? HemoryColors.liveCoral
+                    : HemoryColors.sageSecondary,
+                fontFeatures: const [FontFeature.tabularFigures()],
+              ),
+            ),
+          ],
         ),
       ),
     );

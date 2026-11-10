@@ -58,14 +58,15 @@ class RecordingService extends StateNotifier<RecordingSessionState> {
   }
 
   void _initSubscriptions() {
-    if (_streams == null) return;
+    final streams = _streams;
+    if (streams == null) return;
 
-    _stateSub = _streams.stateStream.listen((snapshot) {
+    _stateSub = streams.stateStream.listen((snapshot) {
       final nativeState = RecordingCaptureState.fromWire(snapshot.state);
       _onNativeStateEvent(nativeState, snapshot.elapsedMs);
     });
 
-    _eventsSub = _streams.eventsStream.listen((event) {
+    _eventsSub = streams.eventsStream.listen((event) {
       if (event.type == 'STATE_CHANGED') {
         final stateWire = event.payload['state'] as String? ?? '';
         final nativeState = RecordingCaptureState.fromWire(stateWire);

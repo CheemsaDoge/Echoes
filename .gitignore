@@ -21,3 +21,7 @@ artifacts/*.jar
 *.apk
 .kotlin/
 .agents/
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+**/GeneratedPluginRegistrant.java

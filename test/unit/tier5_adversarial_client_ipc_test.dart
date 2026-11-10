@@ -4,7 +4,6 @@ library;
 
 import 'dart:async';
 import 'dart:io';
-import 'dart:math';
 
 import '../../lib/core/models/recording_state.dart';
 import '../../lib/core/models/timeline_models.dart';

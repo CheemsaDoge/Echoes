@@ -14,7 +14,7 @@ class RecordingSessions extends Table {
   TextColumn get localDayKey => text()(); // 'YYYY-MM-DD'
   Int64Column get startedAt => int64()(); // epoch milliseconds
   Int64Column get endedAt => int64().nullable()();
-  Int64Column get durationMs => int64().withDefault(const Constant(0))();
+  Int64Column get durationMs => int64().withDefault(Constant(BigInt.zero))();
   TextColumn get syncStatus => text().withDefault(const Constant('local'))(); // 'local', 'syncing', 'synced', 'failed'
   Int64Column get createdAt => int64()();
   Int64Column get updatedAt => int64()();
@@ -80,7 +80,7 @@ class TimelineEventsCache extends Table {
   TextColumn get summary => text().nullable()();
   Int64Column get startedAt => int64()();
   Int64Column get endedAt => int64().nullable()();
-  Int64Column get durationMs => int64().withDefault(const Constant(0))();
+  Int64Column get durationMs => int64().withDefault(Constant(BigInt.zero))();
   IntColumn get priorityTier => integer()(); // 0: P0 Live, 1: P1 Chain, 2: P2 Activity, 3: P3 Chat, 4: P4 Coverage
   IntColumn get speakerCount => integer().withDefault(const Constant(0))();
   TextColumn get payloadJson => text()();
@@ -116,7 +116,7 @@ class SpeakerProfilesCache extends Table {
 @DataClassName('MutationSyncStateEntry')
 class MutationSyncState extends Table {
   TextColumn get vaultId => text()();
-  Int64Column get lastCursor => int64().withDefault(const Constant(0))();
+  Int64Column get lastCursor => int64().withDefault(Constant(BigInt.zero))();
   Int64Column get lastSyncedAt => int64()();
 
   @override

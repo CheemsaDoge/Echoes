@@ -1,5 +1,5 @@
-/// Horizontal DateStrip with magnetic snap-to-center physics,
-/// edge fade mask, and dual-range [-7, +1] prefetching callbacks.
+/// Horizontal DateStrip with magnetic centering, dynamic date-window anchoring,
+/// edge fade mask, and real daily density indicators.
 library;
 
 import 'package:flutter/material.dart';
@@ -10,7 +10,7 @@ class DateStrip extends StatefulWidget {
   final DateTime selectedDate;
   final ValueChanged<DateTime> onDateSelected;
   final void Function(DateTime centerDate)? onPrefetchRequested;
-  final Map<String, int> activityDensityMap; // 'YYYY-MM-DD' -> eventCount
+  final Map<String, int> activityDensityMap;
 
   const DateStrip({
     super.key,
@@ -25,42 +25,50 @@ class DateStrip extends StatefulWidget {
 }
 
 class _DateStripState extends State<DateStrip> {
+  static const List<String> _weekdayLabels = ['一', '二', '三', '四', '五', '六', '日'];
   late final ScrollController _scrollController;
-  final double cellWidth = 52.0;
-  final double cellMargin = 8.0;
+  final double cellWidth = 48.0;
+  final double cellMargin = 6.0;
   late final double stride;
 
-  // Render a range of days around today (-30 to +7)
-  final int pastDays = 30;
+  final int pastDays = 21;
   final int futureDays = 7;
-  late final List<DateTime> _dates;
+  late List<DateTime> _dates;
 
   @override
   void initState() {
     super.initState();
     stride = cellWidth + cellMargin;
-    final now = DateTime.now();
-    final today = DateTime(now.year, now.month, now.day);
-
-    _dates = List.generate(
-      pastDays + futureDays + 1,
-      (i) => today.subtract(Duration(days: pastDays - i)),
-    );
-
+    _dates = _buildWindowAround(widget.selectedDate);
     _scrollController = ScrollController();
 
-    // Trigger initial [-7, +1] prefetch
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _scrollToDate(widget.selectedDate, animate: false);
       widget.onPrefetchRequested?.call(widget.selectedDate);
     });
   }
 
+  List<DateTime> _buildWindowAround(DateTime anchor) {
+    final center = DateTime(anchor.year, anchor.month, anchor.day);
+    return List.generate(
+      pastDays + futureDays + 1,
+      (i) => center.subtract(Duration(days: pastDays - i)),
+    );
+  }
+
   @override
   void didUpdateWidget(covariant DateStrip oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (!DateUtils.isSameDay(oldWidget.selectedDate, widget.selectedDate)) {
-      _scrollToDate(widget.selectedDate, animate: true);
+      final idx = _dates.indexWhere((d) => DateUtils.isSameDay(d, widget.selectedDate));
+      if (idx <= 2 || idx >= _dates.length - 3) {
+        _dates = _buildWindowAround(widget.selectedDate);
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _scrollToDate(widget.selectedDate, animate: false);
+        });
+      } else {
+        _scrollToDate(widget.selectedDate, animate: true);
+      }
       widget.onPrefetchRequested?.call(widget.selectedDate);
     }
   }
@@ -68,8 +76,8 @@ class _DateStripState extends State<DateStrip> {
   void _scrollToDate(DateTime date, {bool animate = true}) {
     final index = _dates.indexWhere((d) => DateUtils.isSameDay(d, date));
     if (index != -1 && _scrollController.hasClients) {
-      final screenWidth = MediaQuery.of(context).size.width;
-      final targetOffset = (index * stride) - (screenWidth / 2) + (stride / 2);
+      final viewport = _scrollController.position.viewportDimension;
+      final targetOffset = (index * stride) - (viewport / 2) + (stride / 2) + 16.0;
       final clamped = targetOffset.clamp(
         0.0,
         _scrollController.position.maxScrollExtent,
@@ -78,7 +86,7 @@ class _DateStripState extends State<DateStrip> {
       if (animate) {
         _scrollController.animateTo(
           clamped,
-          duration: const Duration(milliseconds: 320),
+          duration: const Duration(milliseconds: 280),
           curve: Curves.easeOutCubic,
         );
       } else {
@@ -106,17 +114,17 @@ class _DateStripState extends State<DateStrip> {
             Colors.black,
             Colors.transparent,
           ],
-          stops: [0.0, 0.08, 0.92, 1.0],
+          stops: [0.0, 0.06, 0.94, 1.0],
         ).createShader(bounds);
       },
       blendMode: BlendMode.dstIn,
       child: SizedBox(
-        height: 64.0,
+        height: 60.0,
         child: ListView.builder(
           controller: _scrollController,
           scrollDirection: Axis.horizontal,
           physics: const BouncingScrollPhysics(),
-          padding: const EdgeInsets.symmetric(horizontal: 24.0),
+          padding: const EdgeInsets.symmetric(horizontal: 16.0),
           itemCount: _dates.length,
           itemBuilder: (context, index) {
             final date = _dates[index];
@@ -145,17 +153,16 @@ class _DateStripState extends State<DateStrip> {
     bool isToday,
     int eventCount,
   ) {
-    final dayOfWeek = DateFormat('E').format(date).substring(0, 1); // e.g. M, T, W
+    final dayOfWeek = _weekdayLabels[(date.weekday - 1).clamp(0, 6)];
     final dayOfMonth = date.day.toString();
-
     final dotsCount = eventCount > 3 ? 3 : eventCount;
 
     return Container(
       width: cellWidth,
-      padding: const EdgeInsets.symmetric(vertical: 6.0),
+      padding: const EdgeInsets.symmetric(vertical: 5.0),
       decoration: BoxDecoration(
         color: isSelected ? HemoryColors.darkSurface2 : Colors.transparent,
-        borderRadius: BorderRadius.circular(14.0),
+        borderRadius: BorderRadius.circular(13.0),
         border: Border.all(
           color: isSelected
               ? HemoryColors.sagePrimary
@@ -189,20 +196,22 @@ class _DateStripState extends State<DateStrip> {
             ),
           ),
           const SizedBox(height: 3.0),
-          // Micro Activity Dots
-          Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: List.generate(
-              dotsCount,
-              (i) => Container(
-                width: 3.5,
-                height: 3.5,
-                margin: const EdgeInsets.symmetric(horizontal: 1.0),
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: isSelected
-                      ? HemoryColors.sagePrimary
-                      : HemoryColors.textLightMuted.withOpacity(0.6),
+          SizedBox(
+            height: 4.0,
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: List.generate(
+                dotsCount,
+                (i) => Container(
+                  width: 3.5,
+                  height: 3.5,
+                  margin: const EdgeInsets.symmetric(horizontal: 1.0),
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: isSelected
+                        ? HemoryColors.sagePrimary
+                        : HemoryColors.textLightMuted.withValues(alpha: 0.65),
+                  ),
                 ),
               ),
             ),

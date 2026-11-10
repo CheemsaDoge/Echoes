@@ -3,7 +3,6 @@ library;
 
 import 'dart:convert';
 import 'package:http/http.dart' as http;
-import '../db/local_database.dart';
 
 class UploadResult {
   final bool success;

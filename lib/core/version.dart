@@ -1,0 +1,5 @@
+/// Canonical 4-tier application version for Hemory.
+library;
+
+const String kAppVersion = '0.1.9.8';
+const String kDefaultServerUrl = 'https://record.xmdoge.com';

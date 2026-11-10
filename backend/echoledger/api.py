@@ -1,7 +1,8 @@
 from __future__ import annotations
 import asyncio, contextlib, copy, hashlib, json, os, secrets, shutil, threading
 from pathlib import Path
-from fastapi import FastAPI, APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi import FastAPI, APIRouter, Depends, Header, HTTPException, Query, Request, File, Form, UploadFile
+from starlette import status as http_status
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
@@ -12,12 +13,16 @@ from .models import (SessionCreate, SessionClose, ChunkMeta, ProfileCreate, Eval
                      SpeakerCreate, SpeakerAssign, VoiceprintCreate, VoiceMatch, EventTypeCreate,
                      EventPatch, MemoryPatch, VadConfig, VadConfigPatch, AsrConfig, AsrConfigPatch,
                      VadRuntimeConfig, VadRuntimeConfigPatch, VoiceprintConfig, VoiceprintConfigPatch,
-                     RuntimeConfigResponse, RuntimeConfigPatch)
+                     RuntimeConfigResponse, RuntimeConfigPatch, PrimaryDeviceRequest,
+                     PrimaryDeviceResponse, UploadRecordingResponse)
 from .pipeline import Pipeline, plan_batches
 from .worker import run_loop
 from .queries import list_events, get_event, search_memories
 from .speakers import normalize, match_speaker
 from .vad import speech_intervals, score_intervals
+from .lease import LeaseRejectionException, PrimaryLeaseArbiter
+from .storage import StorageService
+from .upload import UploadService, AudioBitstreamException
 from . import mcp
 
 
@@ -40,15 +45,179 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if thread:
             await asyncio.to_thread(thread.join, 5)
 
-    app = FastAPI(title="EchoLedger API", version="0.1.0", lifespan=lifespan,
+    app = FastAPI(title="EchoLedger API", version="0.1.1", lifespan=lifespan,
                   description="Single-owner audio journal. All v1 routes require a Bearer token.",
                   docs_url="/docs", redoc_url=None)
+    storage = StorageService(settings.data_dir)
+    upload_service = UploadService(db, storage, settings.max_upload_bytes)
     app.state.db, app.state.pipeline, app.state.settings = db, pipeline, settings
+    app.state.storage, app.state.upload_service = storage, upload_service
+
+    @app.exception_handler(LeaseRejectionException)
+    def lease_rejection_handler(request: Request, exc: LeaseRejectionException):
+        return JSONResponse(status_code=exc.status_code, content=exc.detail)
+
+    @app.exception_handler(AudioBitstreamException)
+    def audio_bitstream_handler(request: Request, exc: AudioBitstreamException):
+        return JSONResponse(status_code=exc.status_code, content=exc.detail)
 
     def authorize(authorization: str | None = Header(default=None)):
         expected = "Bearer " + settings.api_token
         if authorization is None or not secrets.compare_digest(authorization, expected):
             raise HTTPException(401, "Invalid bearer token", headers={"WWW-Authenticate": "Bearer"})
+
+    def authenticate_tenancy(request: Request) -> dict[str, Any]:
+        authorization = request.headers.get("Authorization", "")
+        if not authorization or not authorization.startswith("Bearer "):
+            raise HTTPException(status_code=401, detail="Missing or malformed Authorization header")
+        token = authorization[7:].strip()
+        if not token:
+            raise HTTPException(status_code=401, detail="Invalid bearer token")
+
+        h_tenant = request.headers.get("x-tenant-id")
+        h_vault = request.headers.get("x-vault-id")
+        h_user = request.headers.get("x-user-id")
+        h_dp = request.headers.get("x-dp-instance-id")
+
+        is_admin = secrets.compare_digest(token, settings.api_token)
+
+        tenant_id = h_tenant
+        vault_id = h_vault
+        user_id = h_user
+        dp_instance_id = h_dp
+
+        if not is_admin:
+            binding = db.one("SELECT * FROM device_bindings WHERE push_token=? OR binding_id=?", (token, token))
+            if binding:
+                user_id = user_id or binding["user_id"]
+                tenant_id = tenant_id or binding["tenant_id"]
+                dp_instance_id = dp_instance_id or binding["dp_instance_id"]
+            else:
+                user_row = db.one("SELECT * FROM users WHERE user_id=? OR email=?", (token, token))
+                if user_row:
+                    user_id = user_id or user_row["user_id"]
+                    tenant_id = tenant_id or user_row["tenant_id"]
+
+            if not tenant_id and user_id:
+                u = db.get_user(user_id)
+                if u:
+                    tenant_id = u["tenant_id"]
+
+        return {
+            "token": token,
+            "is_admin": is_admin,
+            "tenant_id": tenant_id,
+            "vault_id": vault_id,
+            "user_id": user_id,
+            "dp_instance_id": dp_instance_id,
+        }
+
+    @app.get("/tenants/{tenant_id}")
+    def get_tenant(tenant_id: str, request: Request, auth: dict = Depends(authenticate_tenancy)):
+        if not auth.get("is_admin") and auth.get("tenant_id") and auth["tenant_id"] != tenant_id:
+            raise HTTPException(status_code=403, detail="Cross-tenant access forbidden")
+        tenant = db.get_tenant(tenant_id)
+        if not tenant:
+            raise HTTPException(status_code=404, detail="Tenant not found")
+        return tenant
+
+    @app.get("/tenants/{tenant_id}/vaults/{vault_id}")
+    def get_vault(tenant_id: str, vault_id: str, request: Request, auth: dict = Depends(authenticate_tenancy)):
+        if not auth.get("is_admin"):
+            if auth.get("tenant_id") and auth["tenant_id"] != tenant_id:
+                raise HTTPException(status_code=403, detail="Cross-tenant access forbidden")
+            if auth.get("vault_id") and auth["vault_id"] != vault_id:
+                vault = db.get_vault(vault_id, tenant_id)
+                if not vault:
+                    raise HTTPException(status_code=404, detail="Vault not found")
+                raise HTTPException(status_code=403, detail="Cross-vault access forbidden")
+        vault = db.get_vault(vault_id, tenant_id)
+        if not vault:
+            raise HTTPException(status_code=404, detail="Vault not found")
+        return vault
+
+    @app.get("/speakers")
+    def list_speakers_scoped(request: Request, auth: dict = Depends(authenticate_tenancy)):
+        vault_id = auth.get("vault_id") or "vlt_default"
+        rows = db.all("SELECT speaker_id, vault_id, name, role_label, created_at FROM speaker_profiles WHERE vault_id=? ORDER BY created_at", (vault_id,))
+        if not rows:
+            legacy = db.all("SELECT id AS speaker_id, name, notes FROM speakers ORDER BY name")
+            speakers = [{"speaker_id": r["speaker_id"], "vault_id": vault_id, "name": r["name"]} for r in legacy]
+        else:
+            speakers = [dict(r) for r in rows]
+        return {"speakers": speakers}
+
+    @app.put("/primary-device", response_model=PrimaryDeviceResponse, tags=["Lease"])
+    @app.put("/v1/primary-device", response_model=PrimaryDeviceResponse, tags=["Lease"])
+    def put_primary_device(payload: PrimaryDeviceRequest, request: Request, auth: dict = Depends(authenticate_tenancy)):
+        tenant_id = auth.get("tenant_id")
+        user_id = auth.get("user_id")
+        with db.connect(immediate=True) as conn:
+            return PrimaryLeaseArbiter.acquire_primary_device(
+                conn=conn,
+                dp_instance_id=payload.dp_instance_id,
+                vault_id=payload.vault_id,
+                tenant_id=tenant_id,
+                user_id=user_id,
+            )
+
+    @app.post(
+        "/tenants/{tenant_id}/vaults/{vault_id}/recordings/upload",
+        status_code=http_status.HTTP_201_CREATED,
+        response_model=UploadRecordingResponse,
+        tags=["Recordings"],
+    )
+    @app.post(
+        "/tenants/{tenantId}/vaults/{vaultId}/recordings/upload",
+        status_code=http_status.HTTP_201_CREATED,
+        response_model=UploadRecordingResponse,
+        include_in_schema=False,
+    )
+    @app.post(
+        "/v1/tenants/{tenant_id}/vaults/{vault_id}/recordings/upload",
+        status_code=http_status.HTTP_201_CREATED,
+        response_model=UploadRecordingResponse,
+        include_in_schema=False,
+    )
+    async def upload_recording(
+        request: Request,
+        tenant_id: str | None = None,
+        vault_id: str | None = None,
+        tenantId: str | None = None,
+        vaultId: str | None = None,
+        started_at: str = Form(...),
+        format: str = Form(...),
+        source: str = Form(...),
+        capture_timezone: str | None = Form(default=None),
+        capture_metadata: str = Form(...),
+        file: UploadFile = File(...),
+        auth: dict = Depends(authenticate_tenancy),
+    ):
+        eff_tenant = tenant_id or tenantId
+        eff_vault = vault_id or vaultId
+        if not eff_tenant or not eff_vault:
+            raise HTTPException(status_code=400, detail="Missing tenant_id or vault_id in path")
+
+        if not auth.get("is_admin"):
+            if auth.get("tenant_id") and auth["tenant_id"] != eff_tenant:
+                raise HTTPException(status_code=403, detail="Access denied: micro-isolation breach")
+            if auth.get("vault_id") and auth["vault_id"] != eff_vault:
+                raise HTTPException(status_code=403, detail="Access denied: micro-isolation breach")
+
+        uploading_dp_id = request.headers.get("x-dp-instance-id")
+
+        return await upload_service.handle_upload(
+            tenant_id=eff_tenant,
+            vault_id=eff_vault,
+            started_at=started_at,
+            format_str=format,
+            source=source,
+            capture_timezone=capture_timezone,
+            capture_metadata_str=capture_metadata,
+            file=file,
+            auth_context=auth,
+            uploading_dp_id_header=uploading_dp_id,
+        )
 
     def get_session(session_id):
         row = db.one("SELECT * FROM sessions WHERE id=?", (session_id,))
@@ -60,7 +229,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/healthz")
     def health():
-        return {"ok": True, "version": "0.1.0"}
+        return {"ok": True, "version": "0.1.1"}
 
     web_root = Path(__file__).resolve().parents[2] / "web"
     if (web_root / "index.html").exists():

@@ -134,10 +134,12 @@ object SelfHealingController {
         runCatching {
             SegmentManifestManager.get(context, deadRecordingId).finalizeSession("HAL_LOCKUP")
         }
-        // Restart foreground service with ACTION_START
-        val serviceIntent = Intent(RecordingForegroundService.ACTION_START).apply {
-            setPackage(context.packageName)
+        // Restart foreground service explicitly with ACTION_RECOVER
+        val serviceIntent = Intent(context, RecordingForegroundService::class.java).apply {
+            action = RecordingForegroundService.ACTION_RECOVER
             putExtra(RecordingForegroundService.EXTRA_RECORDING_ID, "rec_recovered_${System.currentTimeMillis()}")
+            putExtra(RecordingForegroundService.EXTRA_TENANT_ID, RecordingForegroundService.activeTenantId ?: "")
+            putExtra(RecordingForegroundService.EXTRA_VAULT_ID, RecordingForegroundService.activeVaultId ?: "")
             putExtra("recovery_reason", reason)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {

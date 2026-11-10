@@ -44,6 +44,7 @@ class RecordingForegroundService : Service() {
         const val ACTION_STOP = "net.hemory.app.recording.ACTION_STOP"
         const val ACTION_PAUSE = "net.hemory.app.recording.ACTION_PAUSE"
         const val ACTION_RESUME = "net.hemory.app.recording.ACTION_RESUME"
+        const val ACTION_RECOVER = "net.hemory.app.recording.ACTION_RECOVER"
 
         // Intent Extras
         const val EXTRA_RECORDING_ID = "recording_id"
@@ -166,6 +167,17 @@ class RecordingForegroundService : Service() {
                 isPaused.set(false)
                 currentState = RecordingState.RECORDING
                 broadcastState()
+                return START_NOT_STICKY
+            }
+            ACTION_RECOVER -> {
+                Log.d(TAG, "Received ACTION_RECOVER. Resetting and restarting capture pipeline.")
+                val recordingId = intent.getStringExtra(EXTRA_RECORDING_ID) ?: "rec_recovered_${System.currentTimeMillis()}"
+                val tenantId = intent.getStringExtra(EXTRA_TENANT_ID) ?: (activeTenantId ?: "")
+                val vaultId = intent.getStringExtra(EXTRA_VAULT_ID) ?: (activeVaultId ?: "")
+                val uid = intent.getStringExtra(EXTRA_USER_ID) ?: userId
+
+                stopPipeline("HAL_DEADLOCK_RECOVER")
+                startForegroundServiceInternal(recordingId, tenantId, vaultId, uid)
                 return START_NOT_STICKY
             }
             ACTION_START -> {
@@ -291,6 +303,8 @@ class RecordingForegroundService : Service() {
             override fun onCaptureError(throwable: Throwable) {
                 Log.e(TAG, "AudioRecord capture failure", throwable)
                 stopPipeline("captureError: ${throwable.message}")
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
             }
         })
         capture = captureInstance

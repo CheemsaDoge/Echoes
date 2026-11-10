@@ -49,4 +49,11 @@ class DeadManSwitchDiscriminatorTest {
         )
         assertEquals(WatchdogAction.HAL_DEADLOCK_RESTART, action)
     }
+
+    @Test
+    fun testActionRecoverConstantsAndPayloads() {
+        assertEquals("net.hemory.app.recording.ACTION_RECOVER", RecordingForegroundService.ACTION_RECOVER)
+        assertEquals("net.hemory.app.recording.ACTION_START", RecordingForegroundService.ACTION_START)
+        assertEquals("net.hemory.app.recording.ACTION_STOP", RecordingForegroundService.ACTION_STOP)
+    }
 }

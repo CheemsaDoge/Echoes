@@ -720,3 +720,44 @@ class TestMultiTenantMicroIsolation:
         assert len(matches) >= 1
         assert any(m["title"] == "Parking Location" for m in matches)
 
+    def test_vertex_credential_prefix_and_self_contained_paths(self, tmp_path):
+        from echoledger.config import resolve_vertex_credentials_path, Settings
+        from echoledger.chat import GeminiChatAgent
+
+        # Create dummy gcp files in tmp_path: one empty, one valid service_account
+        empty_cred = tmp_path / "gcpAgentplantform_empty"
+        empty_cred.write_text("", encoding="utf-8")
+        valid_cred = tmp_path / "gcpAgentplantform_zizekanderson_magpie"
+        valid_cred.write_text(
+            json.dumps({"type": "service_account", "project_id": "gen-lang-client-0778775923"}),
+            encoding="utf-8",
+        )
+
+        resolved_path, proj_id = resolve_vertex_credentials_path(str(tmp_path / "gcpx"))
+        assert resolved_path == str(valid_cred)
+        assert proj_id == "gen-lang-client-0778775923"
+
+        settings = Settings(
+            data_dir=tmp_path,
+            api_token="test-admin-secret-token-32chars",
+            asr_provider="vertexai",
+            vertex_credentials=str(tmp_path / "gcpx"),
+        )
+        assert settings.vertex_credentials == str(valid_cred)
+        assert settings.vertex_project == "gen-lang-client-0778775923"
+        assert settings.vertex_model == "gemini-3.8-flash"
+        assert settings.resolved_db_path == tmp_path / "echoledger.sqlite3"
+        assert settings.resolved_storage_dir == tmp_path / "recordings"
+        assert settings.voiceprint_onnx_path.endswith(".onnx")
+
+        db = Database(tmp_path, db_path=settings.resolved_db_path)
+        agent = GeminiChatAgent(
+            db=db,
+            model=settings.vertex_model,
+            vertex_credentials=settings.vertex_credentials,
+            use_vertexai=True,
+        )
+        assert agent.use_vertexai is True
+        assert agent.vertex_project == "gen-lang-client-0778775923"
+        assert agent.model == "gemini-3.8-flash"
+

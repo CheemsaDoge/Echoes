@@ -82,10 +82,11 @@ def sanitize_fts_tokens(query: str) -> list[str]:
     return [t.strip()[:128] for t in tokens if t.strip()][:32]
 
 class Database:
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, db_path: Path | None = None):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
-        self.path = self.root / "echoledger.sqlite3"
+        self.path = Path(db_path) if db_path is not None else (self.root / "echoledger.sqlite3")
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as c:
             c.executescript(SCHEMA)
             versions = [r[0] for r in c.execute("SELECT version FROM schema_version")]

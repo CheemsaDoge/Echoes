@@ -190,13 +190,15 @@ class VertexAiTranscriber:
         endpoint: str = "",
         transport = None,
     ):
-        self.project = project
+        from .config import resolve_vertex_credentials_path
+        resolved_cred, detected_proj = resolve_vertex_credentials_path(credentials_path) if credentials_path else ("", "")
+        self.project = project or detected_proj
         self.location = location or "global"
         if not model:
             self.model = "gemini-3.8-flash" if self.location in {"global", "us", "eu"} else "gemini-2.5-flash"
         else:
             self.model = model
-        self.credentials_path = credentials_path
+        self.credentials_path = resolved_cred
         self.api_key = api_key
         self.endpoint_override = endpoint
         self.transport = transport

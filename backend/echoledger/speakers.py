@@ -2,6 +2,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import random
 import time
@@ -108,6 +109,8 @@ class SyntheticEmbedder:
         h = hashlib.sha256(samples[:min(len(samples), 32000)].tobytes()).hexdigest()[:16]
         return generate_synthetic_embedding(h).tolist()
 
+DEFAULT_SPEAKER_MODELS_DIR = Path(__file__).resolve().parents[2] / "data" / "models" / "speakers"
+
 SPEAKER_MODEL_FILES = {
     "campplus_cn": "3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx",
     "eres2net_cn": "3dspeaker_speech_eres2net_sv_zh-cn_16k-common.onnx",
@@ -115,7 +118,16 @@ SPEAKER_MODEL_FILES = {
     "nemo_speakernet": "nemo_en_speakerverification_speakernet.onnx",
 }
 
-def list_available_speaker_models(models_dir: Path = Path("data/models/speakers")) -> list[dict]:
+def _resolve_models_dir(models_dir: Path | None = None) -> Path:
+    if models_dir is not None:
+        return Path(models_dir)
+    rel = Path("data/models/speakers")
+    if rel.is_dir():
+        return rel
+    return DEFAULT_SPEAKER_MODELS_DIR
+
+def list_available_speaker_models(models_dir: Path | None = None) -> list[dict]:
+    eff_dir = _resolve_models_dir(models_dir)
     res = []
     meta_info = {
         "campplus_cn": ("Alibaba 3D-Speaker Cam++ (Chinese)", 192, "State-of-the-art fast Cam++ architecture"),
@@ -124,7 +136,7 @@ def list_available_speaker_models(models_dir: Path = Path("data/models/speakers"
         "nemo_speakernet": ("NeMo SpeakerNet (Multilingual)", 256, "Lightweight SpeakerNet from NVIDIA NeMo"),
     }
     for model_id, filename in SPEAKER_MODEL_FILES.items():
-        file_path = models_dir / filename
+        file_path = eff_dir / filename
         name, dim, desc = meta_info.get(model_id, (model_id, 0, ""))
         res.append({
             "id": model_id,
@@ -138,30 +150,46 @@ def list_available_speaker_models(models_dir: Path = Path("data/models/speakers"
     return res
 
 def make_speaker_embedder(name: str, model_path: str = "") -> Any:
+    search_dirs = [Path("data/models/speakers"), DEFAULT_SPEAKER_MODELS_DIR]
     if name == "wespeaker_ecapa_tdnn512":
-        target_file = Path("data/models/speakers") / "wespeaker_ecapa_tdnn512.onnx"
-        if target_file.is_file():
-            return SpeakerEmbedder(str(target_file), model_id=name)
-        # Check if any base model is available to project to 512-dim
-        for candidate in ["wespeaker_resnet34", "campplus_cn", "eres2net_cn", "nemo_speakernet"]:
-            cand_file = Path("data/models/speakers") / SPEAKER_MODEL_FILES[candidate]
-            if cand_file.is_file():
+        explicit_onnx = model_path or os.getenv("ECHOLEDGER_VOICEPRINT_ONNX_PATH", "").strip()
+        if explicit_onnx:
+            exp_path = Path(os.path.expanduser(explicit_onnx))
+            if exp_path.is_file():
                 try:
-                    base = SpeakerEmbedder(str(cand_file), model_id=candidate)
+                    base = SpeakerEmbedder(str(exp_path), model_id=name)
+                    if base.dim == 512:
+                        return base
                     return ProjectedEmbedder(base, target_dim=512, model_id=name)
                 except Exception:
                     pass
+        for sdir in search_dirs:
+            target_file = sdir / "wespeaker_ecapa_tdnn512.onnx"
+            if target_file.is_file():
+                return SpeakerEmbedder(str(target_file), model_id=name)
+        # Check if any base model is available to project to 512-dim
+        for sdir in search_dirs:
+            for candidate in ["wespeaker_resnet34", "campplus_cn", "eres2net_cn", "nemo_speakernet"]:
+                cand_file = sdir / SPEAKER_MODEL_FILES[candidate]
+                if cand_file.is_file():
+                    try:
+                        base = SpeakerEmbedder(str(cand_file), model_id=candidate)
+                        return ProjectedEmbedder(base, target_dim=512, model_id=name)
+                    except Exception:
+                        pass
         return SyntheticEmbedder(model_id=name, dim=512)
 
     if name not in SPEAKER_MODEL_FILES:
         raise ValueError(f"Unknown speaker model: {name}. Supported: {list(SPEAKER_MODEL_FILES.keys())}")
     target_path = model_path
     if not target_path:
-        default_file = Path("data/models/speakers") / SPEAKER_MODEL_FILES[name]
-        if default_file.is_file():
-            target_path = str(default_file)
-        else:
-            raise RuntimeError(f"Speaker model missing: {default_file}")
+        for sdir in search_dirs:
+            default_file = sdir / SPEAKER_MODEL_FILES[name]
+            if default_file.is_file():
+                target_path = str(default_file)
+                break
+        if not target_path:
+            raise RuntimeError(f"Speaker model missing: {Path('data/models/speakers') / SPEAKER_MODEL_FILES[name]}")
     return SpeakerEmbedder(target_path, model_id=name)
 
 def spot_check_speaker_models(

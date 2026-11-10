@@ -10,6 +10,7 @@ import logging
 import re
 import secrets
 import time
+from pathlib import Path
 from typing import Any, AsyncGenerator
 from zoneinfo import ZoneInfo
 
@@ -380,15 +381,68 @@ class SyntheticGeminiAgent:
 # -----------------------------------------------------------------------------
 
 class GeminiChatAgent:
-    """Production Gemini API reasoning agent supporting multi-turn chat,
+    """Production Gemini / Vertex AI reasoning agent supporting multi-turn chat,
     tool execution, and streaming text generation.
     """
 
-    def __init__(self, db: Database, api_key: str | None = None, model: str = "gemini-3.8-flash"):
+    def __init__(
+        self,
+        db: Database,
+        api_key: str | None = None,
+        model: str = "gemini-3.8-flash",
+        vertex_project: str | None = None,
+        vertex_location: str = "global",
+        vertex_credentials: str | None = None,
+        vertex_api_key: str | None = None,
+        use_vertexai: bool = False,
+    ):
+        from .config import resolve_vertex_credentials_path
+
         self.db = db
         self.api_key = api_key
-        self.model = model
+        self.model = model or "gemini-3.8-flash"
+        resolved_cred, detected_proj = (
+            resolve_vertex_credentials_path(vertex_credentials)
+            if vertex_credentials
+            else ("", "")
+        )
+        self.vertex_credentials = resolved_cred
+        self.vertex_project = vertex_project or detected_proj
+        self.vertex_location = vertex_location or "global"
+        self.vertex_api_key = vertex_api_key
+        self.use_vertexai = bool(
+            use_vertexai
+            or self.vertex_credentials
+            or self.vertex_project
+            or self.vertex_api_key
+        )
         self.mock_fallback = SyntheticGeminiAgent(db)
+
+    def _build_client(self):
+        from google import genai
+
+        if self.use_vertexai:
+            if self.vertex_api_key and not self.vertex_project and not self.vertex_credentials:
+                return genai.Client(vertexai=True, api_key=self.vertex_api_key)
+            creds = None
+            proj = self.vertex_project
+            if self.vertex_credentials and Path(self.vertex_credentials).is_file():
+                import google.auth
+                creds, detected = google.auth.load_credentials_from_file(
+                    self.vertex_credentials,
+                    scopes=["https://www.googleapis.com/auth/cloud-platform"],
+                )
+                if not proj and detected:
+                    proj = detected
+            return genai.Client(
+                vertexai=True,
+                project=proj or None,
+                location=self.vertex_location or "global",
+                credentials=creds,
+            )
+        if self.api_key:
+            return genai.Client(api_key=self.api_key)
+        return None
 
     async def execute_turn(
         self,
@@ -398,8 +452,8 @@ class GeminiChatAgent:
         user_id: str,
         client_context: dict[str, Any] | None = None,
     ) -> None:
-        """Executes streaming turn using Gemini API or falls back to synthetic agent."""
-        if not self.api_key:
+        """Executes streaming turn using Gemini / Vertex AI or falls back to synthetic agent."""
+        if not self.api_key and not self.use_vertexai:
             await self.mock_fallback.execute_turn(buffer, prompt, vault_id, user_id, client_context)
             return
 
@@ -408,10 +462,12 @@ class GeminiChatAgent:
 
         # Check if google-genai is importable
         try:
-            from google import genai
             from google.genai import types
 
-            client = genai.Client(api_key=self.api_key)
+            client = self._build_client()
+            if client is None:
+                await self.mock_fallback.execute_turn(buffer, prompt, vault_id, user_id, client_context)
+                return
             system_instruction = assemble_agent_system_instruction(self.db, vault_id, user_id, client_context)
 
             # Signal recalling phase
@@ -482,16 +538,21 @@ class GeminiChatAgent:
                 # Summarizing phase
                 buffer.append_event("turn_progress", {"phase": "summarizing", "message": "Formulating episodic response"})
 
-                # Final synthesis turn
+                # Final synthesis turn (preserve candidate content for Gemini 3 thought_signature)
+                model_turn = (
+                    response.candidates[0].content
+                    if getattr(response, "candidates", None) and response.candidates[0].content
+                    else types.Content(role="model", parts=[types.Part.from_function_call(name=tool_name, args=tool_args)])
+                )
                 follow_up = await asyncio.to_thread(
                     client.models.generate_content,
                     model=self.model,
                     contents=[
                         types.Content(role="user", parts=[types.Part.from_text(text=prompt)]),
-                        types.Content(role="model", parts=[types.Part.from_function_call(name=tool_name, args=tool_args)]),
+                        model_turn,
                         types.Content(role="user", parts=[types.Part.from_function_response(name=tool_name, response={"result": tool_out["result"]})]),
                     ],
-                    config=types.GenerateContentConfig(system_instruction=system_instruction),
+                    config=types.GenerateContentConfig(system_instruction=system_instruction, tools=tools),
                 )
 
                 if buffer.is_cancelled or buffer.is_completed:

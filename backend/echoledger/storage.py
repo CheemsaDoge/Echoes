@@ -45,9 +45,13 @@ def atomic_write(path: Path, content: bytes) -> None:
 class StorageService:
     """Manages physical storage partitioning and persistence of uploaded audio."""
 
-    def __init__(self, data_dir: Path | str = "./data"):
+    def __init__(self, data_dir: Path | str = "./data", storage_dir: Path | str | None = None):
         self.data_dir = Path(data_dir).resolve()
-        self.recordings_root = self.data_dir / "recordings"
+        self.recordings_root = (
+            Path(storage_dir).resolve()
+            if storage_dir is not None
+            else (self.data_dir / "recordings")
+        )
         self.recordings_root.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
@@ -94,12 +98,14 @@ class StorageService:
         return storage_key + ".meta.json"
 
     def resolve_path(self, storage_key: str) -> Path:
-        """Resolves storage_key to an absolute local filesystem path under data_dir."""
+        """Resolves storage_key to an absolute local filesystem path under data_dir / recordings_root."""
         key = storage_key
         if key.startswith("data/"):
             key = key[5:]
         elif key.startswith("/data/"):
             key = key[6:]
+        if key.startswith("recordings/"):
+            return self.recordings_root / key[len("recordings/"):]
         return self.data_dir / key
 
     def save_recording(

@@ -8,6 +8,7 @@ import functools
 import hashlib
 import io
 import math
+import os
 import subprocess
 import wave
 from pathlib import Path
@@ -519,9 +520,15 @@ def generate_synthetic_aac(duration_sec: float = 5.0, sample_rate: int = 16000) 
 class VoiceprintExtractor:
     """Extracts 512-dim unit-normalized voiceprint embeddings with ONNX / sherpa-onnx / synthetic support."""
 
-    def __init__(self, model_id: str = "wespeaker_ecapa_tdnn512", models_dir: Path | str = "data/models/speakers"):
+    def __init__(
+        self,
+        model_id: str = "wespeaker_ecapa_tdnn512",
+        models_dir: Path | str = "data/models/speakers",
+        onnx_path: str = "",
+    ):
         self.model_id = model_id
         self.models_dir = Path(models_dir)
+        self.onnx_path = onnx_path or os.getenv("ECHOLEDGER_VOICEPRINT_ONNX_PATH", "").strip()
         self._embedder = None
         self._init_engine()
 
@@ -529,7 +536,7 @@ class VoiceprintExtractor:
         try:
             from .speakers import make_speaker_embedder
             # Attempt to load known model from speakers.py
-            self._embedder = make_speaker_embedder(self.model_id)
+            self._embedder = make_speaker_embedder(self.model_id, model_path=self.onnx_path)
         except Exception:
             self._embedder = None
 

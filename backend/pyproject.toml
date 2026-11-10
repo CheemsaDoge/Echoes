@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "echoledger"
-version = "0.1.5.8"
+version = "0.1.6.8"
 description = "Local-first personal audio journal backend"
 requires-python = ">=3.11"
 dependencies = [
@@ -15,6 +15,7 @@ dependencies = [
     "numpy>=1.26,<3",
     "python-multipart>=0.0.9",
     "google-auth>=2.28,<3",
+    "google-genai>=1.0",
     "requests>=2.28,<3",
 ]
 

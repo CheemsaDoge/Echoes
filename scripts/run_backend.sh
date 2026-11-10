@@ -6,4 +6,8 @@ set -a
 . ./.env
 set +a
 export PYTHONPATH="$PWD/backend${PYTHONPATH:+:$PYTHONPATH}"
-exec python -m uvicorn echoledger.main:app --host "${HOST:-127.0.0.1}" --port "${PORT:-8000}" --workers 1 --no-access-log
+PYTHON_BIN="python3"
+if [ -x "$PWD/.venv/bin/python3" ]; then
+    PYTHON_BIN="$PWD/.venv/bin/python3"
+fi
+exec "$PYTHON_BIN" -m uvicorn echoledger.main:app --host "${HOST:-127.0.0.1}" --port "${PORT:-8000}" --workers 1 --no-access-log

@@ -40,7 +40,7 @@ from . import mcp
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings()
-    db = Database(settings.data_dir)
+    db = Database(settings.data_dir, db_path=settings.db_path)
     db.load_into_settings(settings)
     settings.validate()
     pipeline = Pipeline(db, settings)
@@ -60,7 +60,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="EchoLedger API", version="0.1.1", lifespan=lifespan,
                   description="Single-owner audio journal. All v1 routes require a Bearer token.",
                   docs_url="/docs", redoc_url=None)
-    storage = StorageService(settings.data_dir)
+    storage = StorageService(settings.data_dir, storage_dir=settings.storage_dir)
     upload_service = UploadService(db, storage, settings.max_upload_bytes)
     turn_manager = TurnStreamManager(retention_seconds=60.0)
     app.state.db, app.state.pipeline, app.state.settings = db, pipeline, settings
@@ -1268,7 +1268,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # If not completed and no execution in progress, start agent execution task
         if not buf.is_completed and not buf.is_cancelled:
             if not turn_manager.is_executing(turn_id):
-                agent = GeminiChatAgent(db=db, api_key=settings.gemini_key, model=settings.gemini_model)
+                use_vertex = settings.asr_provider == "vertexai" and bool(
+                    settings.vertex_credentials or settings.vertex_project or settings.vertex_api_key
+                )
+                effective_chat_model = (
+                    settings.vertex_model if use_vertex else settings.gemini_model
+                ) or "gemini-3.8-flash"
+                if effective_chat_model == "gemini-3.5-transcribe":
+                    effective_chat_model = "gemini-3.8-flash"
+                agent = GeminiChatAgent(
+                    db=db,
+                    api_key=settings.gemini_key,
+                    model=effective_chat_model,
+                    vertex_project=settings.vertex_project,
+                    vertex_location=settings.vertex_location,
+                    vertex_credentials=settings.vertex_credentials,
+                    vertex_api_key=settings.vertex_api_key,
+                    use_vertexai=use_vertex,
+                )
                 exec_task = asyncio.create_task(
                     agent.execute_turn(
                         buffer=buf,

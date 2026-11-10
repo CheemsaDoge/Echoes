@@ -39,7 +39,7 @@ class Auth7Tuple {
         throw ArgumentError('Missing required Auth7Tuple key: $key');
       }
       final val = map[key];
-      if (val is! String || val.isEmpty) {
+      if (val is! String || val.trim().isEmpty) {
         throw ArgumentError('Auth7Tuple field "$key" must be a non-empty String (got: $val)');
       }
     }

@@ -70,6 +70,17 @@ void main() {
         threwEmpty = true;
       }
       assertTrue(threwEmpty, 'Empty string for $strKey must throw ArgumentError');
+
+      for (final ws in [' ', '   ', '\t', '\n', '\r\n', ' \t \n \r ']) {
+        final wsMap = Map<String, dynamic>.from(validMap)..[strKey] = ws;
+        bool threwWs = false;
+        try {
+          Auth7Tuple.fromMap(wsMap);
+        } on ArgumentError {
+          threwWs = true;
+        }
+        assertTrue(threwWs, 'Whitespace-only string for $strKey must throw ArgumentError');
+      }
     }
 
     // Timestamp validation: zero and negative timestamps

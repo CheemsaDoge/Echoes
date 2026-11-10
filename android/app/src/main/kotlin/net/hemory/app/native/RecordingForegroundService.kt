@@ -380,6 +380,7 @@ class RecordingForegroundService : Service() {
             status = UploadEntryState.Pending,
             recordingStartedAtMs = artifacts.segmentId,
             sha256 = artifacts.sha256Hex,
+            captureTimezone = java.util.TimeZone.getDefault().id,
             source = "ambient"
         )
         uploadQueue.enqueue(queueEntry)

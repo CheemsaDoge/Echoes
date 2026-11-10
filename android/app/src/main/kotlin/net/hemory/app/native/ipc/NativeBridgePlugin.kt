@@ -165,12 +165,21 @@ class NativeBridgePlugin : FlutterPlugin, MethodCallHandler {
             }
         }
 
-        val prefs = context?.getSharedPreferences("connection", Context.MODE_PRIVATE)
-        prefs?.edit()?.apply {
-            putString("token", args["accessToken"]?.toString())
+        val ctx = context ?: run {
+            result.error("ILLEGAL_STATE", "Context is null", null)
+            return
+        }
+
+        val securePrefs = dev.echoledger.app.data.SecurePreferences(ctx)
+        val tokenStr = args["accessToken"]?.toString() ?: ""
+        val baseUrlStr = args["baseUrl"]?.toString() ?: ""
+        securePrefs.token = tokenStr
+        securePrefs.baseUrl = baseUrlStr
+
+        val prefs = ctx.getSharedPreferences("connection", Context.MODE_PRIVATE)
+        prefs.edit().apply {
             putString("refresh_token", args["refreshToken"]?.toString())
             putString("expires_at", args["expiresAt"]?.toString())
-            putString("url", args["baseUrl"]?.toString())
             putString("slot_connection_type", args["slotConnectionType"]?.toString())
             putString("slot_dp_unit_id", args["slotDpUnitId"]?.toString())
             putString("active_tenant_id", args["slotTenantId"]?.toString())
@@ -182,13 +191,18 @@ class NativeBridgePlugin : FlutterPlugin, MethodCallHandler {
     }
 
     private fun getStoredAuth(): Map<String, Any?>? {
-        val prefs = context?.getSharedPreferences("connection", Context.MODE_PRIVATE) ?: return null
-        val token = prefs.getString("token", null) ?: return null
+        val ctx = context ?: return null
+        val securePrefs = dev.echoledger.app.data.SecurePreferences(ctx)
+        val prefs = ctx.getSharedPreferences("connection", Context.MODE_PRIVATE)
+        val token = securePrefs.token.takeIf { it.isNotEmpty() }
+            ?: prefs.getString("token", null)
+            ?: return null
+
         return mapOf(
             "accessToken" to token,
             "refreshToken" to prefs.getString("refresh_token", ""),
             "expiresAt" to prefs.getString("expires_at", ""),
-            "baseUrl" to prefs.getString("url", ""),
+            "baseUrl" to securePrefs.baseUrl.ifEmpty { prefs.getString("url", "") ?: "" },
             "slotConnectionType" to prefs.getString("slot_connection_type", ""),
             "slotDpUnitId" to prefs.getString("slot_dp_unit_id", ""),
             "slotTenantId" to prefs.getString("active_tenant_id", ""),
@@ -197,7 +211,9 @@ class NativeBridgePlugin : FlutterPlugin, MethodCallHandler {
     }
 
     private fun clearStoredAuth() {
-        val prefs = context?.getSharedPreferences("connection", Context.MODE_PRIVATE)
-        prefs?.edit()?.clear()?.apply()
+        val ctx = context ?: return
+        runCatching { dev.echoledger.app.data.SecurePreferences(ctx).token = "" }
+        val prefs = ctx.getSharedPreferences("connection", Context.MODE_PRIVATE)
+        prefs.edit().clear().apply()
     }
 }

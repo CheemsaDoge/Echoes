@@ -291,8 +291,9 @@ class UploadWorker(
 
     private fun getActiveCredentials(): JSONObject? {
         val prefs = applicationContext.getSharedPreferences("connection", Context.MODE_PRIVATE)
-        val token = prefs.getString("token", "") ?: ""
-        val baseUrl = prefs.getString("url", "") ?: ""
+        val securePrefs = runCatching { dev.echoledger.app.data.SecurePreferences(applicationContext) }.getOrNull()
+        val token = securePrefs?.token?.takeIf { it.isNotEmpty() } ?: prefs.getString("token", "") ?: ""
+        val baseUrl = securePrefs?.baseUrl?.takeIf { it.isNotEmpty() } ?: prefs.getString("url", "") ?: ""
         val tenantId = prefs.getString("active_tenant_id", "") ?: ""
         val vaultId = prefs.getString("active_vault_id", "") ?: ""
 

@@ -26,6 +26,7 @@ class AppGraph(val app: Application) {
             UploadScheduler.enqueue(app)
             dev.echoledger.app.network.StandaloneScheduler.scheduleRecovery(app)
             dev.echoledger.app.network.StandaloneScheduler.enqueue(app)
+            net.hemory.app.worker.UploadScheduler.schedulePeriodicRecovery(app)
         }
     }
 }

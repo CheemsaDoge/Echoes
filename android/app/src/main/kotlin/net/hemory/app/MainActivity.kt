@@ -14,8 +14,10 @@ class MainActivity : FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
-        // Register NativeBridgePlugin
-        flutterEngine.plugins.add(NativeBridgePlugin())
+        // Register NativeBridgePlugin (ActivityAware attaches automatically via FlutterEngine)
+        if (!flutterEngine.plugins.has(NativeBridgePlugin::class.java)) {
+            flutterEngine.plugins.add(NativeBridgePlugin())
+        }
 
         // Register RecordingEventStreamRegistry with BinaryMessenger
         val registry = RecordingEventStreamRegistry(

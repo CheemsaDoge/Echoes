@@ -122,6 +122,7 @@ class UploadWorker(
         val activeAuth = getActiveCredentials()
         val activeTenantId = activeAuth?.optString("tenantId") ?: ""
         val activeVaultId = activeAuth?.optString("vaultId") ?: ""
+        val activeDpInstanceId = activeAuth?.optString("dpInstanceId")?.takeIf { it.isNotEmpty() } ?: "dp_default"
         val accessToken = activeAuth?.optString("accessToken") ?: ""
         val baseUrl = activeAuth?.optString("baseUrl")?.trimEnd('/') ?: ""
 
@@ -182,6 +183,9 @@ class UploadWorker(
         val request = Request.Builder()
             .url(uploadUrl)
             .header("Authorization", "Bearer $accessToken")
+            .header("x-dp-instance-id", activeDpInstanceId)
+            .header("x-tenant-id", entry.tenantId)
+            .header("x-vault-id", entry.vaultId)
             .post(requestBody)
             .build()
 
@@ -291,11 +295,12 @@ class UploadWorker(
 
     private fun getActiveCredentials(): JSONObject? {
         val prefs = applicationContext.getSharedPreferences("connection", Context.MODE_PRIVATE)
-        val securePrefs = runCatching { dev.echoledger.app.data.SecurePreferences(applicationContext) }.getOrNull()
+        val securePrefs = runCatching { net.hemory.app.data.HemoryPreferences(applicationContext) }.getOrNull()
         val token = securePrefs?.token?.takeIf { it.isNotEmpty() } ?: prefs.getString("token", "") ?: ""
         val baseUrl = securePrefs?.baseUrl?.takeIf { it.isNotEmpty() } ?: prefs.getString("url", "https://record.xmdoge.com") ?: "https://record.xmdoge.com"
         val tenantId = prefs.getString("active_tenant_id", "ten_default")?.takeIf { it.isNotEmpty() } ?: "ten_default"
         val vaultId = prefs.getString("active_vault_id", "vlt_default")?.takeIf { it.isNotEmpty() } ?: "vlt_default"
+        val dpInstanceId = prefs.getString("slot_dp_unit_id", "dp_default")?.takeIf { it.isNotEmpty() } ?: "dp_default"
 
         if (token.isEmpty() || baseUrl.isEmpty() || tenantId.isEmpty() || vaultId.isEmpty()) {
             return null
@@ -306,6 +311,7 @@ class UploadWorker(
             put("baseUrl", baseUrl)
             put("tenantId", tenantId)
             put("vaultId", vaultId)
+            put("dpInstanceId", dpInstanceId)
         }
     }
 }

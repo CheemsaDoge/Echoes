@@ -352,8 +352,8 @@ class RecordingForegroundService : Service() {
     private fun finalizeSegmentSink(splitReason: String, silenceMs: Long?) {
         val sink = activeSink ?: return
         val currentRid = activeRecordingId ?: return
-        val currentTenant = activeTenantId ?: ""
-        val currentVault = activeVaultId ?: ""
+        val currentTenant = activeTenantId?.takeIf { it.isNotBlank() } ?: "ten_default"
+        val currentVault = activeVaultId?.takeIf { it.isNotBlank() } ?: "vlt_default"
 
         val artifacts = sink.finalize(
             tenantId = currentTenant,
@@ -362,6 +362,13 @@ class RecordingForegroundService : Service() {
             splitReason = splitReason,
             silenceMsBeforeCut = silenceMs
         )
+
+        if (artifacts.sizeBytes <= 0L) {
+            Log.d(TAG, "Skipping 0-byte segment sink for rid=$currentRid index=${artifacts.segmentIndex}")
+            runCatching { artifacts.audioFile.delete() }
+            runCatching { artifacts.metaFile.delete() }
+            return
+        }
 
         // Add to Session Manifest
         SegmentManifestManager.get(this, currentRid).addSegment(artifacts)
@@ -479,6 +486,16 @@ class RecordingForegroundService : Service() {
     }
 
     private fun buildForegroundNotification(): Notification {
+        val openAppIntent = Intent(this, net.hemory.app.MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val openPendingIntent = PendingIntent.getActivity(
+            this,
+            1000,
+            openAppIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
         val stopIntent = Intent(this, RecordingForegroundService::class.java).apply {
             action = ACTION_STOP
         }
@@ -491,12 +508,13 @@ class RecordingForegroundService : Service() {
 
         return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-            .setContentTitle("Hemory Recording")
-            .setContentText("Ambient background capture active")
+            .setContentTitle("Hemory")
+            .setContentText("正在后台录制环境记忆")
+            .setContentIntent(openPendingIntent)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
-            .addAction(android.R.drawable.ic_media_pause, "Stop", stopPendingIntent)
+            .addAction(android.R.drawable.ic_media_pause, "停止", stopPendingIntent)
             .build()
     }
 

@@ -30,6 +30,10 @@ jobs:
       - uses: android-actions/setup-android@v3
         with:
           packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+      - run: flutter pub get && flutter analyze lib test && flutter test test/widget/timeline_ui_and_api_test.dart
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.10.2'

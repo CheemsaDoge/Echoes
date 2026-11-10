@@ -1,9 +1,9 @@
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
-    id("org.jetbrains.kotlin.plugin.compose")
-    id("com.google.devtools.ksp")
+    id("dev.flutter.flutter-gradle-plugin")
 }
+
 fun gitExecOutput(vararg args: String): String? = try {
     val execProvider = providers.exec {
         workingDir = rootDir
@@ -23,7 +23,7 @@ fun gitExecOutput(vararg args: String): String? = try {
 // Versioning state machine after base commit:
 // - Stage completion ([stage] / [major] / release(stage)): major + 1, minor = 0, patch = 0, remove 4th level
 // - Major feature update (feat!: / [minor]): minor + 1, patch = 0, remove 4th level
-// - Feature update (feat): patch + 1, keep 4th level and reset to 0 (e.g. 0.3.12.0)
+// - Feature update (feat): patch + 1, preserve 4th level unchanged
 // - Bugfix (fix / other): only increment 4th level (e.g. 0.3.11.1 -> 0.3.11.2)
 val baseCommitSha = "0704b5f"
 val v0311BaseCommitCount = 60
@@ -122,6 +122,7 @@ fun nonBlankEnvOrProp(vararg keys: String): String? {
 android {
     namespace = "dev.echoledger.app"
     compileSdk = 35
+    ndkVersion = "27.0.12077973"
     defaultConfig {
         applicationId = "dev.echoledger.app"
         minSdk = 26
@@ -160,10 +161,11 @@ android {
         debug { applicationIdSuffix = ".debug" }
         release {
             isMinifyEnabled = false
+            isShrinkResources = false
             signingConfig = releaseSigning
         }
     }
-    buildFeatures { compose = true; buildConfig = true }
+    buildFeatures { buildConfig = true }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -171,28 +173,17 @@ android {
     kotlinOptions { jvmTarget = "17" }
     packaging { resources.excludes += "/META-INF/{AL2.0,LGPL2.1}" }
 }
-ksp { arg("room.schemaLocation", "$projectDir/schemas") }
+
+flutter {
+    source = "../.."
+}
+
 dependencies {
     implementation(project(":core"))
-    val composeBom = platform("androidx.compose:compose-bom:2025.02.00")
-    implementation(composeBom)
-    implementation("androidx.compose.ui:ui")
-    implementation("androidx.compose.ui:ui-tooling-preview")
-    implementation("androidx.compose.material3:material3")
-    implementation("androidx.compose.material:material-icons-extended")
-    debugImplementation("androidx.compose.ui:ui-tooling")
-    implementation("androidx.activity:activity-compose:1.10.0")
     implementation("androidx.core:core-ktx:1.15.0")
-    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
-    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
-    implementation("androidx.room:room-runtime:2.7.0")
-    implementation("androidx.room:room-ktx:2.7.0")
-    ksp("androidx.room:room-compiler:2.7.0")
     implementation("androidx.work:work-runtime-ktx:2.10.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.1")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
-    implementation("com.squareup.okhttp3:okhttp-sse:4.12.0")
-    implementation("io.flutter:flutter_embedding_debug:1.0.0-c416acfeb8126e097f758c664aaa3da929e27da0")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.1")

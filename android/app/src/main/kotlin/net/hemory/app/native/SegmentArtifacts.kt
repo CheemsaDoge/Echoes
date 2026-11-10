@@ -69,24 +69,35 @@ class SegmentFileSink(
         }
         val sha256Hex = sha256.digest().joinToString("") { "%02x".format(it) }
 
-        // Read battery state
+        // Read battery state & active dpInstanceId
         val (batteryLevel, isCharging) = getBatteryState(context)
+        val dpInstanceId = runCatching {
+            context.getSharedPreferences("connection", Context.MODE_PRIVATE)
+                .getString("slot_dp_unit_id", "dp_default")
+                ?.takeIf { it.isNotBlank() }
+        }.getOrNull() ?: "dp_default"
 
-        // Construct TransferMetadata JSON (schemaVersion: 1)
+        // Construct TransferMetadata JSON (schemaVersion: 1, emitting both camelCase & snake_case)
         val iso = DateTimeFormatter.ISO_INSTANT
         val metaJson = JSONObject().apply {
             put("schemaVersion", 1)
             put("tenantId", tenantId)
             put("vaultId", vaultId)
+            put("dpInstanceId", dpInstanceId)
+            put("dp_instance_id", dpInstanceId)
             put("captureTimezone", TimeZone.getDefault().id)
             put("source", "app_default")
             put("captureMode", "continuous")
             put("splitReason", splitReason)
+            put("split_reason", splitReason)
             put("silenceMsBeforeCut", silenceMsBeforeCut ?: JSONObject.NULL)
+            put("silence_ms_before_cut", silenceMsBeforeCut ?: JSONObject.NULL)
             put("sessionStartedAt", iso.format(startedAtInstant))
             put("userId", userId)
             put("liveSessionId", recordingId)
+            put("live_session_id", recordingId)
             put("segmentIndex", segmentIndex)
+            put("segment_index", segmentIndex)
             put("segmentState", "upload_ready")
             put("segmentStartedAt", iso.format(startedAtInstant))
             put("segmentFinalizedAt", iso.format(finalizedAtInstant))

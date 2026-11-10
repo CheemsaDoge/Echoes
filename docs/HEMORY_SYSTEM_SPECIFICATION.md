@@ -2466,54 +2466,65 @@ Bit 0                       Bit 15                      Bit 31                  
 
 ---
 
-#### 4.1.2 切片边界引擎 (静音 VAD silence_ms_before_cut >= 1250ms, 最大分段时长保护, .meta JSON 伴生文件)
+#### 4.1.2 切片边界引擎 (弹性窗口 26m–30m, 静音 VAD -40.0 dBFS / >= 800ms, .meta 伴生文件与 manifest.json)
 
-#### 2.2.1 Slicing Boundary Decision Engine
-Audio recording runs continuously and is sliced into discrete audio segments based on real-time Voice Activity Detection (VAD) energy calculations and duration ceilings:
+#### 2.2.1 Slicing Boundary Decision Engine (`Me.C0890e`, `lf.c`, `jf.C3043B`, `jf.H`)
+Audio recording runs continuously and is sliced into discrete audio segments by the coroutine loop in `Me.C0890e.invokeSuspend` (`C0890e.java:44-162`) based on real-time RMS dBFS energy calculations and an **Elastic Rollover Window** (`1,560,000 ms` [26 min] soft limit to `1,800,000 ms` [30 min] hard limit):
 
 ```
-[PCM Stream from AudioRecord]
+[PCM Stream from AudioRecord (16kHz, 16-bit Mono)]
         │
-        ├─ Calculate Root Mean Square (RMS) Frame Energy
+        ├─ Frame duration: j10 = (sampleCount * 1000) / 16000 ms
+        ├─ RMS dBFS: d10 = 20.0 * log10(sqrt(sum(s[i]^2) / sampleCount) / 32768.0)
         ▼
-   [Is Energy < Silence Threshold?]
-        ├─ YES ──> Accumulate consecutive silence duration (ms)
-        │           │
-        │           ├─ If silence >= silence_ms_before_cut (nominal 1200ms) 
-        │           │   └──> Trigger Slice: split_reason = "silence_detected"
+   [Is d10 < -40.0 dBFS?]
+        ├─ YES ──> Accumulate silence: h10.f32661d.f6924a += j10
+        └─ NO  ──> Reset silence accumulator: h10.f32661d.f6924a = 0L
         │
-        └─ NO  ──> Reset silence accumulator
-                    │
-                    └─ If total segment duration >= max_duration (nominal 90s - 120s)
-                        └──> Trigger Slice: split_reason = "max_duration_reached"
+        ▼
+   [Check Segment Elapsed Time: j11 = (nowMs - sessionStartMs) - segmentStartOffsetMs]
+        ├─ j11 < 1,560,000 ms (26 min)
+        │   └──> lf.c.None (Continue writing to current .aac segment)
+        ├─ 1,560,000 ms <= j11 < 1,800,000 ms (26–30 min) AND silenceMs >= 800 ms
+        │   └──> lf.c.Silence ──> RolloverElastic (split_reason = "silence_window", silence_ms_before_cut = silenceMs)
+        └─ j11 >= 1,800,000 ms (30 min)
+            └──> lf.c.HardLimit ──> RolloverElastic (split_reason = "hard_limit", silence_ms_before_cut = null)
 ```
 
-1. **Silence Cut (VAD / Energy-based)**:
-   - Silence detector monitors energy across sliding 20ms frames.
-   - When consecutive silent frames exceed `silence_ms_before_cut` (nominal range: 800ms - 2000ms; default 1250ms), the writer cuts the segment at the trailing edge of speech.
-2. **Maximum Segment Duration Limit**:
-   - To guarantee predictable memory consumption and bounded upload latencies, continuous un-silenced speech is split at `max_segment_duration` (nominal: 60,000ms - 120,000ms).
-3. **Session Interruption / Manual Stop**:
-   - If the user taps "Stop Listening" or a phone call preempts the microphone, the current segment is immediately closed with `split_reason: "user_stop"` or `split_reason: "interrupted"`.
+1. **Silence Cut in Elastic Window (`lf.c.Silence`)**:
+   - On every PCM read, RMS power is computed in dBFS (`20.0 * log10(rms / 32768.0)`). Frames with `d10 < -40.0` dBFS increment the continuous silence accumulator (`H3.q.f6924a`); any frame `>= -40.0` dBFS resets it to `0L`.
+   - Once the current segment reaches the **26-minute soft threshold (`1,560,000 ms`)**, the first continuous silence of **`>= 800 ms`** triggers `C3043B.invokeSuspend` → `jf.H.a()`, closing the current segment with `closeReason = hf.i.RolloverElastic`, `splitReason = hf.k.SilenceWindow` (`"silence_window"`), and recording `silence_ms_before_cut`.
+2. **Hard Duration Ceiling (`lf.c.HardLimit`)**:
+   - If continuous speech prevents an 800 ms silence gap throughout the 26–30 minute elastic window, reaching **`1,800,000 ms` (30 minutes)** forces an immediate cut (`lf.c.HardLimit`, `splitReason = hf.k.HardLimit` / `"hard_limit"`, `silence_ms_before_cut = null`).
+3. **System Resource Pressure & Interruption Rollover (`jf.H.e`, `jf.H.q`)**:
+   - At every rollover checkpoint (`C3043B`), disk watermark (`tf.h`) is verified: if `Blocked` (< 10 MB / 50 MB critical), recording halts immediately (`hf.b.LowStorage`, `RecordingStoppedDiskFull`).
+   - On `DiskWarning200`, `DiskCritical50`, `MemoryWarning`, or `ThermalSevere`, `jf.H.e()` rolls over the segment with `closeReason = RolloverDiskPressure | RolloverThermalPressure | RolloverMemoryWarning` and `splitReason = "hard_limit"`.
+   - On user manual stop, phone call preemption, or MediaCodec reset, the segment closes with `splitReason = "manual_stop" | "interruption" | "media_services_reset"`.
 
-#### 2.2.2 Storage Layout & File Naming Conventions
-Files are persisted in private application internal storage:
+#### 2.2.2 Storage Layout & File Naming Conventions (`lf.b`, `kf.b`, `kf.c`)
+Files are persisted in private application internal storage under `<filesDir>/Recordings/<recordingId>/`:
 ```
 /data/user/0/net.hemory.app/files/
-└── segments/
-    └── <segment_id>/
-        ├── <segment_id>.aac   # Encoded AAC ADTS audio binary
-        └── <segment_id>.meta  # Sidecar metadata JSON document
+└── Recordings/
+    └── <recordingId>/
+        ├── manifest.json                  # Session SegmentManifest (kf.g, written atomically via .tmp)
+        └── segments/
+            ├── <epochMilli>.aac           # Encoded AAC-LC ADTS audio binary (duration = frames * 1024000 / 16000 ms)
+            └── <epochMilli>.meta          # Sidecar TransferMetadata JSON (kf.h, schemaVersion = 1)
 ```
 
-The relative path calculation (`Lxf/A;.f` at `dex2_full.txt:1182216`) inspects the file path, strips preceding parent directories until reaching `"segments"`, and normalizes the canonical key as `segments/<segment_id>/<file_name>`.
+The relative path helper (`Lxf/A;.f` at `dex2_full.txt:1182216`) strips preceding parent directories until reaching `"segments"` and normalizes the canonical relative key.
 
-#### 2.2.3 Sidecar Metadata JSON Schema (`.meta`)
-Directly extracted from `Lxf/f;.b` (`dex2_full.txt:1185582-1185645`):
+#### 2.2.3 Sidecar `.meta` (`kf.h`) vs Upload `capture_metadata` (`xf.C5247f`)
+1. **On-Disk `.meta` Sidecar (`kf.h` `TransferMetadata`, `kf/c.java`)**:
+   - Persisted alongside `<epochMilli>.aac` for cross-process recovery and `RecordingIndexReconciler` synchronization:
+   - Keys: `schemaVersion` (`1`), `tenantId`, `vaultId`, `captureTimezone`, `source` (`"app_default"`), `captureMode` (`"continuous"`), `splitReason` (`"silence_window"` | `"interruption"` | `"manual_stop"` | `"hard_limit"` | `"media_services_reset"`), `silenceMsBeforeCut`, `sessionStartedAt`, `userId`, `liveSessionId`, `segmentIndex`, `segmentState` (`"recording"` | `"finalizing"` | `"upload_ready"` | `"retained"` | `"deleted"` | `"abandoned"` | `"uploaded"`), `segmentStartedAt`, `segmentFinalizedAt`, `sourceDeviceId`, `localGrantRevision`.
+2. **Multipart `capture_metadata` JSON Form Field (`xf.C5247f.b`, `dex2_full.txt:1185582-1185645`)**:
+   - Constructed at upload time from `UploadQueueEntry` (`xf.H`) + `.meta`:
 
 ```json
 {
-  "capture_mode": "manual",
+  "capture_mode": "auto",
   "device_info": {
     "model": "Pixel 8 Pro",
     "os_version": "14",
@@ -2526,9 +2537,9 @@ Directly extracted from `Lxf/f;.b` (`dex2_full.txt:1185582-1185645`):
     "channels": 1,
     "bitrate": 48000
   },
-  "elapsed_ms": 58340,
-  "split_reason": "silence_detected",
-  "silence_ms_before_cut": 1250
+  "elapsed_ms": 1564200,
+  "split_reason": "silence_window",
+  "silence_ms_before_cut": 832
 }
 ```
 
@@ -4065,7 +4076,7 @@ class AppDatabase extends _$AppDatabase {
 | **§3.2** | 服务端 14 表 PostgreSQL DDL | 逆向综合还原 | 14 张核心关系表与 35 个关键优化索引 (完整 DDL 包含所有级联约束) | 完整的 PostgreSQL 语法，支持异步 asyncpg 驱动 |
 | **§3.3.2** | 上传越权双重防御 | `classes2.dex` | `upload_identity_mismatch_skipped_at_send` | `UploadWorker` 发送前强校验，租户不匹配直接熔断 |
 | **§3.4** | 服务端 REST API 全集 | `openapi.json`, `libapp.so` | 8 大领域、31 个权威 API 端点规范字典 | 包含完整的 Query/Body JSON Schema 与响应模型 |
-| **§4.1.2** | 静音切片决策引擎 | `classes2.dex` | `silence_ms_before_cut >= 1250ms`, 最大时长 300s, 最小时长 10s, `.meta` JSON 伴生文件 | 智能 VAD 静音切片与异常兜底 |
+| **§4.1.2** | 静音切片决策引擎 | `classes2.dex` (`Me.C0890e`, `lf.c`, `kf.h`) | 弹性窗口 `1,560,000ms` (26m) – `1,800,000ms` (30m), 静音阈值 `< -40.0 dBFS` 且持续 `>= 800ms`, `.meta` 伴生文件与 `manifest.json` | 26–30m 弹性窗口内遇 800ms 静音切片 (`silence_window`)，30m 强制硬切片 (`hard_limit`) |
 | **§4.1.5** | 多段音频上传表单 | `classes2.dex`, `libapp.so` | `POST /tenants/{tenant_id}/vaults/{vault_id}/recordings/upload`, 6 段表单字段 | 成功返回 201 实体模型，包含 `recording_id`, `storage_key` |
 | **§4.2** | SSE 对话与工具调用 | `libapp.so` | `POST /chat/threads/{thread_id}/turns`, `turn_progress` (`recalling` -> `executing` -> `summarizing`), `search_memory`, `search_sections` | 全生命周期 Wire Events、卡片渲染与客户端中断 |
 | **§4.3** | 声纹入库与聚类 | `libapp.so` | 16kHz AAC, SNR >= 12dB, 有效语音 >= 3.0s, 512 维向量, 在线 $\tau=0.78$, 离线 $\tau=0.72$ | `ClusterPatchRequest` 三大动作 (`markAsNewSpeaker` 等) |

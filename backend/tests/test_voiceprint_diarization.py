@@ -644,3 +644,118 @@ class TestSpeakersAndClustersApi:
             json={"action": "invalid_action"},
         )
         assert res_invalid.status_code == 422
+
+    def test_create_speaker_with_invalid_or_foreign_cluster_id_returns_404(self, auth_client: TestClient, test_app):
+        # 1. Nonexistent cluster_id returns 404
+        res = auth_client.post(
+            "/speakers",
+            json={"name": "Ghost Speaker", "cluster_id": "cls_nonexistent_999"},
+        )
+        assert res.status_code == 404
+        assert "not found" in res.json()["detail"].lower()
+
+        # 2. Foreign vault cluster_id returns 404
+        db = test_app.state.pipeline.db
+        with db.connect(immediate=True) as c:
+            c.execute("INSERT OR IGNORE INTO vaults (vault_id, tenant_id, name) VALUES ('vlt_foreign_cls', 'ten_default', 'Foreign Vault')")
+        foreign_cls = db.create_voiceprint_cluster(
+            cluster_id="cls_foreign_888",
+            tenant_id="ten_default",
+            vault_id="vlt_foreign_cls",
+            status="pending",
+        )
+        res_foreign = auth_client.post(
+            "/speakers",
+            json={"name": "Foreign Cluster Speaker", "cluster_id": foreign_cls["cluster_id"]},
+        )
+        assert res_foreign.status_code == 404
+
+    def test_mark_existing_idempotent_sample_count(self, test_app):
+        db = test_app.state.pipeline.db
+        spk = db.create_speaker_profile(
+            speaker_id="spk_idem_01",
+            tenant_id="ten_default",
+            vault_id="vlt_default",
+            user_id="usr_default",
+            name="Idempotent Speaker",
+            sample_count=2,
+        )
+        cls = db.create_voiceprint_cluster(
+            cluster_id="cls_idem_01",
+            tenant_id="ten_default",
+            vault_id="vlt_default",
+            status="pending",
+            occurrences_count=3,
+        )
+
+        # First mark_existing: increments sample_count by 3 -> 5
+        db.patch_voiceprint_cluster_mark_existing("cls_idem_01", "vlt_default", "spk_idem_01")
+        spk_after_1 = db.get_speaker_profile("spk_idem_01", "vlt_default")
+        assert spk_after_1["sample_count"] == 5
+
+        # Second mark_existing (retry): should remain 5, not 8
+        db.patch_voiceprint_cluster_mark_existing("cls_idem_01", "vlt_default", "spk_idem_01")
+        spk_after_2 = db.get_speaker_profile("spk_idem_01", "vlt_default")
+        assert spk_after_2["sample_count"] == 5
+
+
+def test_clipping_ratio_int16_negative_overflow():
+    # In int16, -32768 is the full-scale negative value; abs(-32768) overflows without widening
+    samples = np.array([-32768, 32767, 0, 100], dtype=np.int16)
+    ratio = calculate_clipping_ratio(samples, threshold=32760)
+    # Both -32768 and 32767 are >= 32760 in absolute value
+    assert ratio == 0.5
+
+
+def test_cluster_segment_empty_pending_clusters_creates_new_cluster():
+    vec = generate_synthetic_embedding("fresh_speaker")
+    decision = cluster_segment(vec, pending_clusters=[])
+    assert decision["action"] == "new_cluster"
+    assert decision["cluster_id"] is None
+
+
+def test_legacy_sqlite_schema_migration_for_clusters_check_constraint(tmp_path):
+    from echoledger.db import Database
+    db_file = tmp_path / "legacy_test"
+    db = Database(db_file)
+
+    # Simulate legacy table check constraint: ('pending', 'identified', 'dismissed')
+    with db.connect(immediate=True) as c:
+        c.execute("PRAGMA foreign_keys=OFF")
+        c.execute("""
+            CREATE TABLE voiceprint_clusters_old (
+                cluster_id VARCHAR(64) PRIMARY KEY,
+                tenant_id VARCHAR(64) NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+                vault_id VARCHAR(64) NOT NULL REFERENCES vaults(vault_id) ON DELETE CASCADE,
+                speaker_id VARCHAR(64) NULL REFERENCES speaker_profiles(speaker_id) ON DELETE SET NULL,
+                status VARCHAR(32) NOT NULL DEFAULT 'pending',
+                embedding_blob BYTEA NULL,
+                audio_sample_url TEXT NULL,
+                confidence_score REAL NOT NULL DEFAULT 0.0,
+                occurrences_count INTEGER NOT NULL DEFAULT 1,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                CONSTRAINT chk_clusters_status CHECK (status IN ('pending', 'identified', 'dismissed'))
+            )
+        """)
+        c.execute("INSERT INTO voiceprint_clusters_old SELECT * FROM voiceprint_clusters")
+        c.execute("DROP TABLE voiceprint_clusters")
+        c.execute("ALTER TABLE voiceprint_clusters_old RENAME TO voiceprint_clusters")
+        c.execute("PRAGMA foreign_keys=ON")
+
+    # Re-initialize Database on the same directory: should trigger migration
+    db_migrated = Database(db_file)
+
+    # Creating / patching to enrolled and merged should now succeed
+    c_new = db_migrated.create_voiceprint_cluster(
+        cluster_id="cls_migrated_01",
+        tenant_id="ten_default",
+        vault_id="vlt_default",
+        status="pending",
+    )
+    with db_migrated.connect(immediate=True) as conn:
+        conn.execute("UPDATE voiceprint_clusters SET status='enrolled' WHERE cluster_id='cls_migrated_01'")
+        conn.execute("UPDATE voiceprint_clusters SET status='merged' WHERE cluster_id='cls_migrated_01'")
+    migrated_row = db_migrated.get_voiceprint_cluster("cls_migrated_01", "vlt_default")
+    assert migrated_row["status"] == "merged"
+

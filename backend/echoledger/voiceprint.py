@@ -220,7 +220,8 @@ def calculate_clipping_ratio(samples: np.ndarray, threshold: int = 32760) -> flo
     """Calculate the ratio of clipped samples (|sample| >= threshold)."""
     if len(samples) == 0:
         return 0.0
-    clipped = np.count_nonzero(np.abs(samples) >= threshold)
+    s32 = samples.astype(np.int32)
+    clipped = np.count_nonzero(np.abs(s32) >= threshold)
     return float(clipped / len(samples))
 
 
@@ -387,7 +388,10 @@ def cluster_segment(
         matches.append((cid, sim))
 
     matches.sort(key=lambda x: x[1], reverse=True)
-    best_cid, best_sim = matches[0] if matches else (None, -1.0)
+    if not matches:
+        return {"action": "new_cluster", "cluster_id": None, "similarity": 0.0}
+
+    best_cid, best_sim = matches[0]
 
     if best_sim >= threshold:
         return {"action": "merge", "cluster_id": best_cid, "similarity": best_sim}

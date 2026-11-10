@@ -165,7 +165,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not name:
             raise HTTPException(status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Speaker name cannot be empty")
 
+        cluster = None
+        if payload.cluster_id:
+            cluster = db.get_voiceprint_cluster(payload.cluster_id, vault_id)
+            if not cluster:
+                raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail=f"Cluster {payload.cluster_id} not found")
+
         new_spk_id = f"spk_{secrets.token_hex(6)}"
+        sample_count = int(cluster.get("occurrences_count", 1)) if cluster else 0
         created = db.create_speaker_profile(
             speaker_id=new_spk_id,
             tenant_id=tenant_id,
@@ -173,22 +180,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             user_id=user_id,
             name=name,
             role_label=payload.role_label,
-            sample_count=1 if payload.cluster_id else 0,
+            sample_count=sample_count,
         )
 
-        if payload.cluster_id:
-            cluster = db.get_voiceprint_cluster(payload.cluster_id, vault_id)
-            if cluster:
-                now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
-                with db.connect(immediate=True) as c:
-                    c.execute(
-                        "UPDATE voiceprint_clusters SET status='enrolled', speaker_id=?, updated_at=? WHERE cluster_id=?",
-                        (new_spk_id, now_iso, payload.cluster_id),
-                    )
-                    c.execute(
-                        "UPDATE section_messages SET speaker_id=?, speaker_name=? WHERE cluster_id=?",
-                        (new_spk_id, name, payload.cluster_id),
-                    )
+        if cluster:
+            now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+            with db.connect(immediate=True) as c:
+                c.execute(
+                    "UPDATE voiceprint_clusters SET status='enrolled', speaker_id=?, updated_at=? WHERE cluster_id=?",
+                    (new_spk_id, now_iso, payload.cluster_id),
+                )
+                c.execute(
+                    "UPDATE section_messages SET speaker_id=?, speaker_name=? WHERE cluster_id=?",
+                    (new_spk_id, name, payload.cluster_id),
+                )
 
         return {
             "speaker_id": created["speaker_id"],

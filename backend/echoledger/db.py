@@ -93,6 +93,31 @@ class Database:
                 if table_info and "cluster_id" not in table_info:
                     c.execute("ALTER TABLE section_messages ADD COLUMN cluster_id VARCHAR(64) NULL REFERENCES voiceprint_clusters(cluster_id) ON DELETE SET NULL")
                     c.execute("CREATE INDEX IF NOT EXISTS idx_section_messages_cluster ON section_messages(cluster_id)")
+                vc_sql_row = c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='voiceprint_clusters'").fetchone()
+                if vc_sql_row and vc_sql_row[0] and ("'enrolled'" not in vc_sql_row[0] or "'merged'" not in vc_sql_row[0]):
+                    c.execute("PRAGMA foreign_keys=OFF")
+                    c.execute("""
+                        CREATE TABLE voiceprint_clusters_new (
+                            cluster_id VARCHAR(64) PRIMARY KEY,
+                            tenant_id VARCHAR(64) NOT NULL REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+                            vault_id VARCHAR(64) NOT NULL REFERENCES vaults(vault_id) ON DELETE CASCADE,
+                            speaker_id VARCHAR(64) NULL REFERENCES speaker_profiles(speaker_id) ON DELETE SET NULL,
+                            status VARCHAR(32) NOT NULL DEFAULT 'pending',
+                            embedding_blob BYTEA NULL,
+                            audio_sample_url TEXT NULL,
+                            confidence_score REAL NOT NULL DEFAULT 0.0,
+                            occurrences_count INTEGER NOT NULL DEFAULT 1,
+                            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                            updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                            CONSTRAINT chk_clusters_status CHECK (status IN ('pending', 'identified', 'enrolled', 'merged', 'dismissed'))
+                        )
+                    """)
+                    c.execute("INSERT INTO voiceprint_clusters_new SELECT * FROM voiceprint_clusters")
+                    c.execute("DROP TABLE voiceprint_clusters")
+                    c.execute("ALTER TABLE voiceprint_clusters_new RENAME TO voiceprint_clusters")
+                    c.execute("CREATE INDEX IF NOT EXISTS idx_voiceprint_clusters_status ON voiceprint_clusters(vault_id, status)")
+                    c.execute("CREATE INDEX IF NOT EXISTS idx_voiceprint_clusters_speaker ON voiceprint_clusters(speaker_id)")
+                    c.execute("PRAGMA foreign_keys=ON")
             except Exception:
                 pass
             if not c.execute("SELECT 1 FROM profiles").fetchone():
@@ -611,6 +636,7 @@ class Database:
                 raise KeyError("Target speaker not found")
 
             occurrences = cluster["occurrences_count"] if "occurrences_count" in cluster.keys() else 1
+            was_already_merged = (cluster["status"] == "merged" and cluster["speaker_id"] == target_speaker_id)
 
             # 1. Update cluster
             c.execute(
@@ -620,13 +646,14 @@ class Database:
                 (target_speaker_id, now_iso, cluster_id),
             )
 
-            # 2. Update speaker sample count
-            c.execute(
-                """UPDATE speaker_profiles
-                   SET sample_count = sample_count + ?, updated_at = ?
-                   WHERE speaker_id = ?""",
-                (occurrences, now_iso, target_speaker_id),
-            )
+            # 2. Update speaker sample count (idempotent: only if not already merged to this target speaker)
+            if not was_already_merged:
+                c.execute(
+                    """UPDATE speaker_profiles
+                       SET sample_count = sample_count + ?, updated_at = ?
+                       WHERE speaker_id = ?""",
+                    (occurrences, now_iso, target_speaker_id),
+                )
 
             # 3. Retroactively update section_messages
             c.execute(

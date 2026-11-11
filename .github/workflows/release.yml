@@ -58,12 +58,10 @@ jobs:
           echo "RELEASE_KEYSTORE_PATH=${RUNNER_TEMP}/release.keystore" >> "$GITHUB_ENV"
 
       - name: Run unit tests
-        working-directory: android
-        run: ./gradlew :core:test :app:testDebugUnitTest
+        run: gradle -p android --no-daemon :core:test :app:testDebugUnitTest
 
       - name: Build Release APK
-        working-directory: android
-        run: ./gradlew assembleRelease
+        run: gradle -p android --no-daemon :app:assembleRelease
         env:
           RELEASE_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
           RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
